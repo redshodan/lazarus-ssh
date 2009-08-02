@@ -1,0 +1,821 @@
+#!/usr/bin/python
+#
+# Copyright (C) 2009 James Newton
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+
+
+import os, pwd, socket, sys, commands, re, random, types
+import tty, termios, signal, select, fcntl, errno, time
+from optparse import OptionParser
+
+SSH_CMD = ["ssh"]
+SSH_BIN = "ssh"
+SSH_ARGS = "-t"
+LSSH_LINE = "-=-=lssh-%d=-=-" % int(random.random() * 1000000)
+TRAP_HUP = "function lssh-exit\n{\nexport HISTFILE=\"\";\n}\n" \
+           "trap lssh-exit EXIT"
+LSSH_FUNC = ("function lssh-list\n{\necho \"%s\"; screen -ls; echo \"%s\";\n}" %
+             (LSSH_LINE, LSSH_LINE))
+SCREEN_CMD = "screen -D -R %s"
+USAGE = "usage: %prog [options] [-- [ssh options] --] host [cmd]"
+PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
+PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
+LINE_RE = re.compile(r"(\r\n|\r|\n)$")
+LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
+SCREEN_LINE_RE = re.compile(r"\s*[0-9]+\.(lssh:[^:]+:[^:]+:[a-z1-9_-]+)(\s|\033\[[0-9]+C)*(\(.*\))")
+LSSH_SESS_RE = re.compile(r"lssh:[^:]+:[^:]+:[a-z1-9_-]+")
+options = None
+db = None
+runner = None
+the_password = None
+ssh_version = None   # v4 added ControlMaster
+logfile = None
+version = "0.1"
+
+def debug(arg):
+    global logfile
+    if options.debug:
+        if not logfile:
+            logfile = open("lssh.log", "w+")
+        logfile.write("%s : %s\n" % (time.time(), arg))
+        logfile.flush()
+
+def passCB1(line, cb, *args):
+    debug("passCB1")
+    cb(*args)
+    if the_password and runner.started:
+        runner.writeTo(the_password)
+        return OutPipe.SKIP
+    else:
+        if not options.nosavepass:
+            runner.inpipe.getLine(passCB2)
+        return OutPipe.FLUSH
+
+def passCB2(line):
+    global the_password
+    debug("passCB2")
+    the_password = line.rstrip("\n").rstrip("\r\n").rstrip("\r")
+
+class StateDB(object):
+    def __init__(self):
+        self.fd = None
+        self.rsessions = []
+
+    def startup(self):
+        self.mysess = [options.session, os.getpid(), False, False]
+        if options.nostatedb:
+            return False
+        if not self.open():
+            sys.exit(-1)
+        self.listRemoteSessions()
+        return True
+
+    def shutdown(self):
+        if options.nostatedb:
+            return
+        if not self.open():
+            return
+        self.write(True)
+
+    def open(self):
+        try:
+            try:
+                self.fd = open(options.statedb, "r+")
+            except IOError, e:
+                if e.errno == errno.ENOENT:
+                    self.fd = open(options.statedb, "w+")
+                else:
+                    raise
+        except Exception, e:
+            print "Failed to open state database '%s': %s" % (options.statedb,
+                                                              str(e))
+            return False
+
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_EX)
+        except Exception, e:
+            print "Failed to lock state database '%s': %s" % (options.statedb,
+                                                              str(e))
+            return False
+
+        if not self.parseDB():
+            return False
+
+        for index in range(len(self.sessions)):
+            if self.sessions[index][0] == options.session:
+                self.sessions[index] = self.mysess
+                break
+        else:
+            self.sessions.append(self.mysess)
+
+        return True
+
+    def parseDB(self):
+        # Format: sid pid <found remote> <attached>
+        self.sessions = []
+        try:
+            debug("lsshdb:")
+            for line in self.fd:
+                debug("dbline: " + line + "\n")
+                sid, pid = line.split()
+                self.sessions.append([sid, int(pid), False, False])
+        except Exception, e:
+            print "Invalid state database '%s': %s" % (options.statedb, str(e))
+            return False
+        return True
+
+    def listLocalSessions(self):
+        try:
+            self.fd = open(options.statedb, "r")
+        except Exception, e:
+            print e
+            print "No sessions"
+            return
+
+        if self.parseDB():
+            for sess in self.sessions:
+                exists = False
+                try:
+                    os.kill(sess[1], 0)
+                    exists = True
+                except OSError, e:
+                    if e.errno == errno.EPERM:
+                        exists = True
+                    elif e.errno == errno.ESRCH:
+                        exists = False
+                if exists:
+                    print "%s    (pid: %s)" % (sess[0], sess[1])
+                else:
+                    print "%s" % sess[0]
+
+    def listRemoteSessions(self):
+        debug("listRemoteSessions")
+        runner.outpipe.resetFilter()
+        runner.outpipe.addRE(PROMPT_RE, self.listRemoteSessionsCB1)
+        runner.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.listRemoteSessions)
+        return OutPipe.SKIP
+
+    def listRemoteSessionsCB1(self, line, *args):
+        debug("listRemoteSessionsCB1")
+        self.started = True
+        runner.outpipe.passing = False
+        runner.outpipe.setRE(LSSH_LINE_RE, self.listRemoteSessionsCB2)
+        #runner.writeTo(TRAP_HUP)
+        runner.writeTo("export HISTFILE=\"\"; declare +x HISTFILE")
+        #runner.writeTo(LSSH_FUNC)
+        #runner.writeTo("lssh-list")
+        runner.writeTo("echo \"%s\"; screen -ls; echo \"%s\"" %
+                       (LSSH_LINE, LSSH_LINE))
+        return OutPipe.SKIP
+
+    def listRemoteSessionsCB2(self, line, *args):
+        debug("listRemoteSessionsCB2")
+        runner.outpipe.setRE(LSSH_LINE_RE, self.listRemoteSessionsCB3)
+        runner.outpipe.buffering = True
+        return OutPipe.SKIP
+
+    def listRemoteSessionsCB3(self, line, *args):
+        debug("listRemoteSessionsCB3")
+        buff = runner.outpipe.getBuff()
+        for line in buff:
+            words = SCREEN_LINE_RE.split(line)
+            if len(words) == 5:
+                self.rsessions.append([words[1], words[3]])
+        self.checkState()
+        runner.startSession(False)
+        return OutPipe.SKIP
+
+    def checkState(self):
+        debug("sessions: %s" % self.sessions)
+        debug("rsessions: %s" % self.rsessions)
+        for lsess in self.rsessions:
+            for sess in self.sessions:
+                if lsess[0] == sess[0]:
+                    sess[2] = True
+                    if (lsess[1] == "(Attached)"):
+                        sess[3] = True
+                    else:
+                        sess[3] = False
+                    break
+            else:
+                if (lsess[1] == "(Attached)"):
+                    attached = True
+                else:
+                    attached = False
+                self.sessions.append([lsess[0], -1, True, attached])
+        for sess in self.sessions:
+            if sess[1] > 0:
+                exists = False
+                try:
+                    os.kill(sess[1], 0)
+                    exists = True
+                except OSError, e:
+                    if e.errno == errno.EPERM:
+                        exists = True
+                    elif e.errno == errno.ESRCH:
+                        exists = False
+                if not exists:
+                    sess[1] = 0
+        debug("sessions: %s" % self.sessions)
+        for sess in self.sessions:
+            if sess is self.mysess:
+                continue
+            if sess[1] == -1:
+                print "Unknown remote session: %s" % sess[0]
+            if sess[1] == 0:
+                print "Local session missing lssh pid: %s" % sess[0]
+            if not sess[2]:
+                print "Uknown local session: %s" % sess[0]
+            if not sess[3]:
+                print "Unattached remote session: %s" % sess[0]
+        self.write(False)
+
+    def write(self, noself):
+        self.fd.seek(0)
+        self.fd.truncate()
+        for sess in self.sessions:
+            if noself and sess is self.mysess:
+                continue
+            if sess[1] > 0:
+                self.fd.write("%s %d\n" % (sess[0], sess[1]))
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_UN)
+        except Exception, e:
+            print "Failed to unlock state database '%s': %s" % (options.statedb,
+                                                                str(e))
+        self.fd.close()
+
+db = StateDB()
+
+class Pipe(object):
+    def __init__(self, ins, outs):
+        self.ifd = None
+        self.ofd = None
+        self.ins = ins
+        self.outs = outs
+        self.buff = None
+
+    def reset(self):
+        self.buff = None
+
+    def setPipes(self, ifd, ofd):
+        self.ifd = ifd
+        self.ofd = ofd
+
+    def run(self):
+        if not self.buff:
+            try:
+                self.buff = os.read(self.ifd, 1024)
+            except OSError, e:
+                if e.errno == errno.EIO:
+                    delList(self.ifd, self.ins)
+                    self.buff = None
+                    return
+                elif e.errno != errno.EAGAIN:
+                    raise
+        if self.buff:
+            debug("READ: '" + self.buff + "'")
+            self.buff = self.filterData(self.buff)
+        if self.buff:
+            try:
+                size = os.write(self.ofd, self.buff)
+            except OSError, e:
+                if e.errno == errno.EAGAIN:
+                    insList(self.ofd, self.outs)
+                    delList(self.ifd, self.ins)
+                    return
+            if size != len(self.buff):
+                insList(self.ofd, self.outs)
+                delList(self.ifd, self.ins)
+                self.buff = self.buff[size:]
+                return
+        else:
+            insList(self.ifd, self.ins)
+            delList(self.ofd, self.outs)
+        self.buff = None
+
+    def isline(self, buff):
+        l = len(buff)
+        ret = buff.rfind("\n")
+        if ((ret > -1) and (ret == l - 1)):
+            return True
+        ret = buff.rfind("\r\n")
+        if ((ret > -1) and (ret == l - 2)):
+            return True
+        ret = buff.rfind("\r")
+        if ((ret > -1) and (ret == l - 1)):
+            return True
+        else:
+            return False
+
+    def filterData(self, buff):
+        return buff
+
+class InPipe(Pipe):
+    def __init__(self, ins, outs):
+        Pipe.__init__(self, ins, outs)
+        self.line = None
+        self.cb = None
+
+    def getLine(self, cb):
+        self.cb = cb
+
+    def filterData(self, buff):
+        if not self.cb:
+            return buff
+        line = buff.splitlines(True)[0]
+        if self.line:
+            self.line = self.line + line
+        else:
+            self.line = line
+        if self.isline(self.line):
+            self.cb(self.line)
+            self.cb = None
+            self.line = None
+        return buff
+
+class OutPipe(Pipe):
+    PASS = 1
+    SKIP = 2
+    FLUSH = 3
+    
+    def __init__(self, ins, outs):
+        Pipe.__init__(self, ins, outs)
+        self.resetFilter()
+
+    def resetFilter(self):
+        self.re = None
+        self.last_line = None
+        self.obuff = []
+        self.buffering = False
+        self.passing = True
+
+    def setRE(self, re, cb, *args):
+        self.re = []
+        self.re.append((re, cb, args))
+
+    def addRE(self, re, cb, *args):
+        if not self.re:
+            self.re = []
+        for index in range(len(self.re)):
+            if self.re[index][0] == re:
+                del self.re[index]
+                break
+        self.re.append((re, cb, args))
+
+    def appendLine(self, buff, line):
+        if (not len(buff) or self.isline(buff[-1])):
+            buff.append(line)
+        else:
+            buff[-1] = buff[-1] + line
+
+    def filterData(self, buff):
+        if not self.re:
+            return buff
+        lines = buff.splitlines(True)
+        if self.last_line:
+            if ((len(lines) == 1) and not self.isline(buff)):
+                self.last_line = self.last_line + buff
+                del lines[:]
+                lines.append(self.last_line)
+            else:
+                lines[0] = self.last_line + lines[0]
+                self.last_line = None
+        elif ((len(lines) == 1) and not self.isline(buff)):
+            self.last_line = buff
+        ret = []
+        cbret = None
+        for line in lines:
+            if self.re:
+                docon = False
+                for re, cb, args in self.re:
+                    if ((isinstance(re, types.StringTypes) and
+                         (line.find(re) >= 0)) or
+                        (not isinstance(re, types.StringTypes) and
+                         re.match(line))):
+                        cbret = cb(line, *args)
+                        if cbret == self.SKIP:
+                            if options.debug:
+                                self.appendLine(ret, line)
+                            docon = True
+                        break
+                if docon:
+                    continue
+            if self.buffering:
+                self.appendLine(self.obuff, line)
+            if self.passing or options.debug:
+                self.appendLine(ret, line)
+        if cbret == self.FLUSH:
+            return "".join(ret)
+        elif len(ret) == 1 and not self.isline(ret[0]):
+            self.last_line = ret[-1]
+            return None
+        elif len(ret) and not self.last_line and not self.isline(ret[-1]):
+            self.last_line = ret[-1]
+            return "".join(ret[:-1])
+        else:
+            return "".join(ret)
+
+    def getBuff(self):
+        ret = "".join(self.obuff).replace("\r\n", "\n").replace("\r", "\n")
+        ret = ret.split("\n")
+        self.obuff = []
+        return ret
+
+class Runner(object):
+    def __init__(self):
+        self.pid = -1
+        self.child = -1
+        self.ins = []
+        self.outs = []
+        self.inpipe = InPipe(self.ins, self.outs)
+        self.outpipe = OutPipe(self.ins, self.outs)
+        self.stdin = sys.stdin.fileno()
+        self.stdout = sys.stdout.fileno()
+        self.orig_tty = termios.tcgetattr(self.stdin)
+        self.started = False
+        self.run_count = 0
+        self.start_timer = 0
+
+    def reset(self):
+        self.pid = -1
+        self.child = -1
+        del self.ins[:]
+        del self.outs[:]
+        self.inpipe.reset()
+        self.outpipe.reset()
+
+    def startSession(self, passing):
+        debug("startSession")
+        self.cmd = ("exec %s" %
+#                    "bash")
+                  (SCREEN_CMD % options.session))
+        self.outpipe.resetFilter()
+        self.outpipe.passing = passing
+        self.outpipe.setRE(PROMPT_RE, self.startSessionCB1)
+        self.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.startSession, passing)
+
+    def startSessionCB1(self, line, *args):
+        debug("startSessionCB1")
+        self.started = True
+        self.outpipe.resetFilter()
+        self.writeTo(self.cmd)
+        self.outpipe.passing = False
+        self.outpipe.setRE(self.cmd, self.startSessionCB2)
+        return OutPipe.SKIP
+
+    def startSessionCB2(self, line, *args):
+        debug("startSessionCB2")
+        self.outpipe.resetFilter()
+        return OutPipe.SKIP
+
+    def writeTo(self, buff):
+        if self.inpipe.buff:
+            self.inpipe.buff = self.inpipe.buff + "\n" + buff + "\n"
+        else:
+            self.inpipe.buff = buff + "\n"
+        insList(self.child, self.outs)
+
+    def sigWINCH(self, signum, frame):
+        if self.pid <= 0:
+            return
+        try:
+            buff = 'abcdefgh'
+            buff = fcntl.ioctl(self.stdin, termios.TIOCGWINSZ, buff)
+            fcntl.ioctl(self.child, termios.TIOCSWINSZ, buff)
+            os.kill(self.pid, signal.SIGWINCH)
+            signal.signal(signal.SIGWINCH, self.sigWINCH)
+        except Exception, e:
+            print "sigWINCH"
+            import traceback
+            traceback.print_exc()
+            print e
+
+    def run(self):
+        ret = True
+        while ret:
+            self.reset()
+            self.start_timer = time.time()
+            self.run_count = self.run_count + 1
+            if self.run_count > 1:
+                self.startSession(True)
+            ret = self.runConnection()
+            if ret:
+                time.sleep(1)
+
+    def runConnection(self):
+        self.pid, self.child = os.forkpty()
+        if self.pid == 0:
+            self.runChild()
+            return False
+
+        signal.signal(signal.SIGWINCH, self.sigWINCH)
+        termios.tcsetattr(self.child, termios.TCSANOW, self.orig_tty)
+        self.sigWINCH(0, 0)
+
+        new = termios.tcgetattr(self.stdin)
+        new[3] = new[3] & ~(termios.ICANON|termios.ECHO|termios.ISIG)
+        termios.tcsetattr(self.stdin, termios.TCSANOW, new)
+
+        fcntl.fcntl(self.stdin, fcntl.F_SETFL, os.O_NONBLOCK)
+        fcntl.fcntl(self.child, fcntl.F_SETFL, os.O_NONBLOCK)
+
+        try:
+            self.ins.extend([self.stdin, self.child])
+            self.inpipe.setPipes(self.stdin, self.child)
+            self.outpipe.setPipes(self.child, self.stdout)
+            while len(self.ins) or len(self.outs):
+                if ((len(self.ins) == 1) and (self.ins[0] == self.stdin) and
+                    not len(self.outs)):
+                    break
+                try:
+                    ret = select.select(self.ins, self.outs, [], 0.5)
+                except select.error, e:
+                    if e[0] == 4:
+                        continue
+                if (self.stdin in ret[0]) or (self.child in ret[1]):
+                    self.inpipe.run()
+                if (self.child in ret[0]) or (self.stdout in ret[1]):
+                    self.outpipe.run()
+        except Exception, e:
+            print "Main loop exception", e, type(e)
+            import traceback
+            traceback.print_exc()
+            pass
+
+        termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
+
+        os.close(self.child)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        os.kill(0, signal.SIGHUP)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+        ret = False
+        try:
+            while True:
+                try:
+                    ret = os.waitpid(self.pid, 0)
+                    if len(self.outpipe.obuff):
+                        print "".join(self.outpipe.obuff)
+                    if options.noreconnect:
+                        return False
+                    if os.WIFEXITED(ret[1]):
+                        retval = os.WEXITSTATUS(ret[1])
+                        debug("ssh exited with %d" % retval)
+                        debug("started=%s" % self.started)
+                        debug("start_timer=%s" % self.start_timer)
+                        debug("now=%s" % time.time())
+                        debug("start_time=%s" % options.start_time)
+                        if retval == 0:
+                            return False
+                        #if ((self.run_count == 1) and
+                        if (not self.started and
+                            (time.time() <=
+                             self.start_timer + options.start_time)):
+                            return False
+                        if retval == 255:
+                            return True
+                        elif retval == 1:
+                            #if self.run_count > 1:
+                            if self.started:
+                                return True
+                            else:
+                                return False
+                        else:
+                            return True
+                    elif os.WIFSIGNALED(ret[1]):
+                        retval = os.WTERMSIG(ret[1])
+                        debug("ssh signaled with %d" % retval)
+                        debug("started=%s" % self.started)
+                        debug("start_timer=%s" % self.start_timer)
+                        debug("now=%s" % time.time())
+                        debug("start_time=%s" % options.start_time)
+                        if retval in (signal.SIGINT, signal.SIGTERM,
+                                      signal.SIGKILL):
+                            return False
+                        else:
+                            return True
+                    else:
+                        # shouldnt happen
+                        return False
+                except OSError, e:
+                    if e.errno == errno.ERESTART:
+                        continue
+                    elif e.errno == errno.ECHILD:
+                        break
+                    else:
+                        raise
+        except Exception, e:
+            print "WAIT exception"
+            import traceback
+            traceback.print_exc()
+            print e
+        return False
+
+    def runChild(self):
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.orig_tty)
+        termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
+        termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, self.orig_tty)
+        #os.execvp("bash", ["bash"])
+        os.execvp(SSH_BIN, options.cmd)
+
+runner = Runner()
+
+def findHost():
+    host = socket.getfqdn()
+    if ((host == "localhost") or (host == "localhost.localdomain")):
+        host = commands.getoutput("hostname")
+    return host
+
+def parseCmdLine():
+    pty = commands.getoutput("tty").lstrip("/dev/").replace("/", "-")
+    localhost = findHost()
+    user = pwd.getpwuid(os.getuid())[0]
+
+    parser = OptionParser(usage=USAGE, version="lssh %s" % version)
+    parser.add_option("-l", "--localhost", dest="localhost",
+                      default=socket.getfqdn(),
+                      help="Override local hostname")
+    parser.add_option("-u", "--user", dest="user",
+                      default=pwd.getpwuid(os.getuid())[0],
+                      help="Override local username")
+    parser.add_option("-s", "--sessionid", dest="session",
+                      default=None, help="Override screen session id")
+    parser.add_option("-d", "--state-db", dest="statedb",
+                      default="~/.lsshdb",
+                      help="Override state database location")
+    parser.add_option("-D", "--no-state-db", dest="nostatedb",
+                      action="store_true", default=False,
+                      help="Disable state database")
+    parser.add_option("-R", "--no-reconnect", dest="noreconnect",
+                      action="store_true", default=False,
+                      help="Disable reconnect logic")
+    parser.add_option("-P", "--no-save-pass", dest="nosavepass",
+                      action="store_true", default=False,
+                      help="Dont save the password in memory")
+    parser.add_option("-z", "--debug", dest="debug",
+                      action="store_true", default=False,
+                      help="Enable debug logging")
+    parser.add_option("-L", "--list", dest="list", action="store_true",
+                      default=False, help="List current lssh sessions")
+#     parser.add_option("-c", "--cmdkey", dest="cmdkey",
+#                       default="^Aa", help="Screen cmdkey. See screen manpage.")
+    parser.add_option("-r", "--screenrc", dest="screenrc",
+                      default="~/.screenrc", help="Screen rc file to use.")
+    (opts, args) = parser.parse_args()
+    opts.statedb = os.path.expanduser(opts.statedb)
+    if opts.list:
+        return opts
+    if not opts.session:
+        opts.session = "lssh:%s:%s:%s" % (opts.localhost, pty, user)
+    host_index = -1
+    rip_index = -1
+    found_dash = False
+    for index in range(len(args)):
+        if args[index] == "--":
+            host_index = index + 1
+            rip_index = index
+            break
+        elif args[index].startswith("-"):
+            found_dash = True
+        elif not found_dash:
+            host_index = index
+            rip_index = index + 1
+            break
+    if ((host_index > -1) and (host_index < len(args) - 1)):
+        opts.ssh_cmd = args[host_index + 1:]
+        if rip_index < host_index:
+            args = args[:rip_index] + args[rip_index+1:host_index+1]
+        else:
+            args = args[:rip_index]
+    else:
+        opts.ssh_cmd = None
+    if host_index == -1:
+        parser.error("A host is required")
+    if not LSSH_SESS_RE.match(opts.session):
+        print "Custom session specified, disabling session management"
+        opts.nostatedb = True
+    opts.ssh_args = args
+    opts.cmd = SSH_CMD + [SSH_ARGS] + opts.ssh_args
+    opts.screenrc = os.path.expanduser(opts.screenrc)
+    opts.start_time = 30
+    opts.retry_time = 5
+    return opts
+
+
+# Non-exception throwing list managment functions. Sometimes python takes
+# exceptions too far.
+def insList(val, list):
+    for index in range(len(list)):
+        if list[index] == val:
+            return
+    else:
+        list.append(val)
+
+def delList(val, list):
+    for index in range(len(list)):
+        if list[index] == val:
+            del list[index]
+            return
+
+if __name__ == "__main__":
+    #ESCAPE_CODE = escapeCharToKey(ESCAPE_CHAR)
+    options = parseCmdLine()
+    debug("lssh %s" % version)
+    debug("cmdline: " + " ".join(sys.argv))
+    if options.list:
+        db.listLocalSessions()
+        sys.exit(0)
+    if not db.startup():
+        runner.startSession(True)
+    runner.run()
+    db.shutdown()
+
+
+
+
+##
+## bitlets
+##
+
+# ESCAPE_CHAR = '\\'
+# PASS_CHAR = '\\'
+# ESCAPE_CODE = None
+# HIDE_CMD = 'h'
+
+# hidden = True
+# esc_found = 0
+
+# def filterInput(buff):
+#     global hidden, esc_found
+#     out = []
+#     print "filterInput in:", esc_found, hidden, buff
+#     for char in buff:
+#         if char == ESCAPE_CODE:
+#             esc_found = esc_found + 1
+#         elif char == PASS_CHAR:
+#             if esc_found % 2 == 1:
+#                 esc_found = esc_found + 1
+#             else:
+#                 esc_found = 0
+#         elif esc_found == 1:
+#             if char == HIDE_CMD:
+#                 # Eat this cmd sequence
+#                 if hidden:
+#                     hidden = False
+#                     print "Unhiding screen"
+#                 else:
+#                     hidden = True
+#                     print "Hiding screen"
+#                 out = out[:len(out) - 1]
+#                 esc_found = 0
+#                 continue
+#             elif hidden:
+#                 # extra escape it
+#                 out.append(PASS_CHAR)
+#                 out.append(ESCAPE_CODE)
+#             esc_found = 0
+#         elif (esc_found > 1) and (esc_found % 2 == 0):
+#             if hidden:
+#                 out.append(ESCAPE_CODE)
+#                 out.append(PASS_CHAR)
+#             esc_found = 0
+#         out.append(char)
+#     print "out array", out
+#     out = "".join(out)
+#     print "filterInput out:", out
+#     return out
+
+# def escapeCharToKey(char):
+#     c = ord(char)
+#     if ((c >= 'a') and (c <= 'z')):
+#         return chr(1 + c - 'a')
+#     else:
+#         if char == '@':
+#             return chr(0x00)
+#         elif char == '[':
+#             return chr(0x1b)
+#         elif char == '\\':
+#             return chr(0x1c)
+#         elif char == ']':
+#             return chr(0x1d)
+#         elif char == '^':
+#             return chr(0x1e)
+#         elif char == '_':
+#             return chr(0x1f)
+#         else:
+#             raise Exception("Unknown control character: %s" % char)
+

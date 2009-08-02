@@ -1,0 +1,18 @@
+- correctly grok host in session id matching.
++ if session overidden and its not a lssh style session then disable session
+  management
++ if session overidden and its lssh style, then manage that session.
+- dbus support to listen for network up/down events
+- have mode to choose a lost session. ncurses/urwid list choice.
+- copy over tmp screenrc file. put it in /tmp, record in db, md5sum check at
+  session startup. dont push again if dont need to.
+- support moving sessions from one client host to another.
+  - copy over .lsshdb and do the right thing
+  - UI to take control and record the session in the local .lsshdb
+
+nice to have later:
+- lssh server:
+  - lssh server manages ssh master connections. timeout on them.
+  - lssh clients use the master connection.
+  - have lssh server mediate db file management.
+- sub-screen cmdkey passing. option to make it behave sanely.

@@ -287,7 +287,7 @@ class Pipe(object):
                 elif e.errno != errno.EAGAIN:
                     raise
         if self.buff:
-            debug("READ: '" + self.buff + "'")
+            debug("READ(%d): '%s'" % (self.ifd, self.buff))
             self.buff = self.filterData(self.buff)
         if self.buff:
             try:

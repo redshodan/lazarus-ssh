@@ -30,7 +30,7 @@ TRAP_HUP = "function lssh-exit\n{\nexport HISTFILE=\"\";\n}\n" \
 LSSH_FUNC = ("function lssh-list\n{\necho \"%s\"; screen -ls; echo \"%s\";\n}" %
              (LSSH_LINE, LSSH_LINE))
 SCREEN_CMD = "screen -D -R %s"
-USAGE = "usage: %prog [options] [-- [ssh options] --] host [cmd]"
+USAGE = "usage: %prog [options] [-- [ssh options]] host"
 PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
 PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
 LINE_RE = re.compile(r"(\r\n|\r|\n)$")
@@ -635,9 +635,9 @@ class Runner(object):
 runner = Runner()
 
 def findHost():
-    host = socket.getfqdn()
-    if ((host == "localhost") or (host == "localhost.localdomain")):
-        host = commands.getoutput("hostname")
+    host = socket.gethostname()
+    if not host or not len(host):
+        host = "localhost"
     return host
 
 def parseCmdLine():
@@ -647,7 +647,7 @@ def parseCmdLine():
 
     parser = OptionParser(usage=USAGE, version="lssh %s" % version)
     parser.add_option("-l", "--localhost", dest="localhost",
-                      default=socket.getfqdn(),
+                      default=localhost,
                       help="Override local hostname")
     parser.add_option("-u", "--user", dest="user",
                       default=pwd.getpwuid(os.getuid())[0],
@@ -681,29 +681,31 @@ def parseCmdLine():
         return opts
     if not opts.session:
         opts.session = "lssh:%s:%s:%s" % (opts.localhost, pty, user)
-    host_index = -1
-    rip_index = -1
-    found_dash = False
-    for index in range(len(args)):
-        if args[index] == "--":
-            host_index = index + 1
-            rip_index = index
-            break
-        elif args[index].startswith("-"):
-            found_dash = True
-        elif not found_dash:
-            host_index = index
-            rip_index = index + 1
-            break
-    if ((host_index > -1) and (host_index < len(args) - 1)):
-        opts.ssh_cmd = args[host_index + 1:]
-        if rip_index < host_index:
-            args = args[:rip_index] + args[rip_index+1:host_index+1]
-        else:
-            args = args[:rip_index]
-    else:
-        opts.ssh_cmd = None
-    if host_index == -1:
+    # host_index = -1
+    # rip_index = -1
+    # found_dash = False
+    # for index in range(len(args)):
+    #     if args[index] == "--":
+    #         host_index = index + 1
+    #         rip_index = index
+    #         break
+    #     elif args[index].startswith("-"):
+    #         found_dash = True
+    #     elif not found_dash:
+    #         host_index = index
+    #         rip_index = index + 1
+    #         break
+    # if ((host_index > -1) and (host_index < len(args) - 1)):
+    #     opts.ssh_cmd = args[host_index + 1:]
+    #     if rip_index < host_index:
+    #         args = args[:rip_index] + args[rip_index+1:host_index+1]
+    #     else:
+    #         args = args[:rip_index]
+    # else:
+    #     opts.ssh_cmd = None
+    # if host_index == -1:
+    #     parser.error("A host is required")
+    if not len(args):
         parser.error("A host is required")
     if not LSSH_SESS_RE.match(opts.session):
         print "Custom session specified, disabling session management"

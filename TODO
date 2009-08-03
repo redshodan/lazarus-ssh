@@ -1,3 +1,4 @@
+- long args for lssh, remove need for --
 - correctly grok host in session id matching.
 + if session overidden and its not a lssh style session then disable session
   management
@@ -16,3 +17,9 @@ nice to have later:
   - lssh clients use the master connection.
   - have lssh server mediate db file management.
 - sub-screen cmdkey passing. option to make it behave sanely.
+
+bugs:
+# this doesnt parse right: lssh -- -l user host
+- line wrap of output watching for. looks like its a space \r that is a soft
+  line wrap.
+# socket.getfqdn() no worky on redhat, wtf?

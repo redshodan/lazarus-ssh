@@ -470,7 +470,6 @@ class Runner(object):
 
     def startSessionCB1(self, line, *args):
         debug("startSessionCB1")
-        self.started = True
         self.outpipe.resetFilter()
         self.writeTo(self.cmd)
         self.outpipe.passing = False
@@ -480,6 +479,9 @@ class Runner(object):
     def startSessionCB2(self, line, *args):
         debug("startSessionCB2")
         self.outpipe.resetFilter()
+        if options.cmd and not self.started:
+            self.writeTo(options.cmd)
+        self.started = True
         return OutPipe.SKIP
 
     def writeTo(self, buff):
@@ -629,7 +631,7 @@ class Runner(object):
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, self.orig_tty)
-        os.execvp(SSH_BIN, options.cmd)
+        os.execvp(SSH_BIN, options.script_cmd)
 
 runner = Runner()
 
@@ -745,7 +747,7 @@ def parseCmdLine():
         print "Custom session specified, disabling session management"
         opts.nostatedb = True
     opts.ssh_args = args
-    opts.cmd = SSH_CMD + [SSH_ARGS] + opts.ssh_args
+    opts.script_cmd = SSH_CMD + [SSH_ARGS] + opts.ssh_args
     opts.screenrc = os.path.expanduser(opts.screenrc)
     opts.start_time = 30
     opts.retry_time = 5

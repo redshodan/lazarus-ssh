@@ -629,7 +629,6 @@ class Runner(object):
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, self.orig_tty)
-        #os.execvp("bash", ["bash"])
         os.execvp(SSH_BIN, options.cmd)
 
 runner = Runner()
@@ -641,12 +640,69 @@ def findHost():
     return host
 
 def parseCmdLine():
+    class Parser(OptionParser):
+        def _process_args(self, largs, rargs, values):
+            while rargs:
+                arg = rargs[0]
+                if arg == "--":
+                    del rargs[0]
+                    return
+                elif arg[0:2] == "--":
+                    self._process_long_opt(rargs, values)
+                elif arg[:1] == "-" and len(arg) > 1:
+                    if not self._process_short_opts(rargs, values):
+                        largs.append(arg)
+                        del rargs[0]
+                elif self.allow_interspersed_args:
+                    largs.append(arg)
+                    del rargs[0]
+                else:
+                    return
+        def _process_short_opts(self, rargs, values):
+            arg = rargs.pop(0)
+            stop = False
+            i = 1
+            for ch in arg[1:]:
+                opt = "-" + ch
+                option = self._short_opt.get(opt)
+                i += 1
+                if not option:
+                    rargs.insert(0, arg)
+                    return False
+                if option.takes_value():
+                    if i < len(arg):
+                        rargs.insert(0, arg[i:])
+                        stop = True
+                    nargs = option.nargs
+                    if len(rargs) < nargs:
+                        if nargs == 1:
+                            self.error(_("%s option requires an argument") % opt)
+                        else:
+                            self.error(_("%s option requires %d arguments")
+                                       % (opt, nargs))
+                    elif nargs == 1:
+                        value = rargs.pop(0)
+                    else:
+                        value = tuple(rargs[0:nargs])
+                        del rargs[0:nargs]
+                else:
+                    value = None
+                option.process(opt, value, values, self)
+                if stop:
+                    break
+            return True
+
     pty = commands.getoutput("tty").lstrip("/dev/").replace("/", "-")
     localhost = findHost()
     user = pwd.getpwuid(os.getuid())[0]
     session = "lssh:%s:%s:%s" % (localhost, pty, user)
 
-    parser = OptionParser(usage=USAGE, version="lssh %s" % version)
+    parser = Parser(usage=USAGE, version="lssh %s" % version)
+    parser.add_option("", "--ls", dest="list", action="store_true",
+                      default=False,
+                      help="List current lssh sessions, default: %default")
+    parser.add_option("", "--cmd", dest="cmd", default=None,
+                      help="Run CMD in the remote session")
     parser.add_option("", "--lhost", dest="localhost",
                       default=localhost,
                       help="Override local hostname, default: %default")
@@ -672,9 +728,6 @@ def parseCmdLine():
     parser.add_option("", "--debug", dest="debug",
                       action="store_true", default=False,
                       help="Enable debug logging, default: %default")
-    parser.add_option("", "--ls", dest="list", action="store_true",
-                      default=False,
-                      help="List current lssh sessions, default: %default")
 #     parser.add_option("-c", "--cmdkey", dest="cmdkey",
 #                       default="^Aa", help="Screen cmdkey. See screen manpage.")
     parser.add_option("", "--screenrc", dest="screenrc",
@@ -686,30 +739,6 @@ def parseCmdLine():
         return opts
     if not opts.session:
         opts.session = "lssh:%s:%s:%s" % (opts.localhost, pty, opts.user)
-    # host_index = -1
-    # rip_index = -1
-    # found_dash = False
-    # for index in range(len(args)):
-    #     if args[index] == "--":
-    #         host_index = index + 1
-    #         rip_index = index
-    #         break
-    #     elif args[index].startswith("-"):
-    #         found_dash = True
-    #     elif not found_dash:
-    #         host_index = index
-    #         rip_index = index + 1
-    #         break
-    # if ((host_index > -1) and (host_index < len(args) - 1)):
-    #     opts.ssh_cmd = args[host_index + 1:]
-    #     if rip_index < host_index:
-    #         args = args[:rip_index] + args[rip_index+1:host_index+1]
-    #     else:
-    #         args = args[:rip_index]
-    # else:
-    #     opts.ssh_cmd = None
-    # if host_index == -1:
-    #     parser.error("A host is required")
     if not len(args):
         parser.error("A host is required")
     if not LSSH_SESS_RE.match(opts.session):

@@ -17,13 +17,14 @@
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 
-import os, pwd, socket, sys, commands, re, random, types
-import tty, termios, signal, select, fcntl, errno, time
+import os, pwd, socket, sys, commands, re, random, types, threading
+import tty, termios, signal, select, fcntl, errno, time, thread
 from optparse import OptionParser
 
 SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
-SSH_ARGS = "-t"
+SSH_ARGS = None
+SSH_ARGS_STR = None
 LSSH_LINE = "-=-=lssh-%d=-=-" % int(random.random() * 1000000)
 TRAP_HUP = "function lssh-exit\n{\nexport HISTFILE=\"\";\n}\n" \
            "trap lssh-exit EXIT"
@@ -35,15 +36,60 @@ PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
 PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
 LINE_RE = re.compile(r"(\r\n|\r|\n)$")
 LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
-SCREEN_LINE_RE = re.compile(r"\s*[0-9]+\.(lssh:[^:]+:[^:]+:[a-z1-9_-]+)(\s|\033\[[0-9]+C)*(\(.*\))")
+SCREEN_LINE_RE = re.compile(
+    r"\s*[0-9]+\.(lssh:[^:]+:[^:]+:[a-z1-9_-]+)(\s|\033\[[0-9]+C)*(\(.*\))")
 LSSH_SESS_RE = re.compile(r"lssh:[^:]+:[^:]+:[a-z1-9_-]+")
+SSH_PING_CMD = "totally.tubularly.bogus /bin/true"
 options = None
 db = None
 runner = None
 the_password = None
-ssh_version = None   # v4 added ControlMaster
+ssh_version = None
+min_ssh_ctl_ver = 4
 logfile = None
 version = "0.1"
+
+class SSHPinger(threading.Thread):
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.pinging = False
+        self.event = threading.Event()
+        self.event.set()
+        thread.start_new_thread(self.timeoutCheck, ())
+
+    def start(self):
+        debug("SSHPinger.start")
+        threading.Thread.start(self)
+
+    def run(self):
+        while True:
+            time.sleep(options.timeout)
+            if not runner.connected:
+                continue
+            debug("SSHPinger.ping")
+            self.pinging = True
+            self.event.set()
+            ret = commands.getstatusoutput("%s %s %s" %
+                                           (SSH_BIN,
+                                            SSH_ARGS_STR % options.ctl_path,
+                                            SSH_PING_CMD))
+            debug("Ping returned: %s" % str(ret))
+            self.pinging = False
+            if ret[0] != 0:
+                runner.sessionFailed()
+
+    def timeoutCheck(self):
+        while True:
+            self.event.wait()
+            self.event.clear()
+            if not self.pinging:
+                continue
+            debug("SSHPinger.timeout waiting")
+            time.sleep(5)
+            debug("SSHPinger.timeout waited")
+            if self.pinging:
+                runner.sessionFailed()
 
 def debug(arg):
     global logfile
@@ -447,8 +493,11 @@ class Runner(object):
         self.stdout = sys.stdout.fileno()
         self.orig_tty = termios.tcgetattr(self.stdin)
         self.started = False
+        self.connected = False
+        self.restart = False
         self.run_count = 0
         self.start_timer = 0
+        self.pinger = None
 
     def reset(self):
         self.pid = -1
@@ -481,8 +530,29 @@ class Runner(object):
         self.outpipe.resetFilter()
         if options.cmd and not self.started:
             self.writeTo(options.cmd)
-        self.started = True
+        self.sessionStarted()
         return OutPipe.SKIP
+
+    def sessionStarted(self):
+        debug("sessionStarted")
+        self.started = True
+        self.connected = True
+        if ((ssh_version >= min_ssh_ctl_ver) and options.timeout and
+            not self.pinger):
+            self.pinger = SSHPinger()
+            self.pinger.start()
+
+    def sessionStopped(self):
+        debug("sessionStopped")
+        self.connected = False
+
+    def sessionFailed(self):
+        debug("sessionFailed")
+        self.restart = True
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except:
+            pass
 
     def writeTo(self, buff):
         if self.inpipe.buff:
@@ -498,8 +568,8 @@ class Runner(object):
             buff = 'abcdefgh'
             buff = fcntl.ioctl(self.stdin, termios.TIOCGWINSZ, buff)
             fcntl.ioctl(self.child, termios.TIOCSWINSZ, buff)
-            os.kill(self.pid, signal.SIGWINCH)
-            signal.signal(signal.SIGWINCH, self.sigWINCH)
+            # os.kill(self.pid, signal.SIGWINCH)
+            # signal.signal(signal.SIGWINCH, self.sigWINCH)
         except Exception, e:
             print "sigWINCH"
             import traceback
@@ -515,6 +585,7 @@ class Runner(object):
             if self.run_count > 1:
                 self.startSession(True)
             ret = self.runConnection()
+            self.sessionStopped()
             if ret:
                 time.sleep(1)
 
@@ -574,6 +645,9 @@ class Runner(object):
                         print "".join(self.outpipe.obuff)
                     if options.noreconnect:
                         return False
+                    if self.restart:
+                        self.restart = False
+                        return True
                     if os.WIFEXITED(ret[1]):
                         retval = os.WEXITSTATUS(ret[1])
                         debug("ssh exited with %d" % retval)
@@ -642,6 +716,7 @@ def findHost():
     return host
 
 def parseCmdLine():
+    global options
     class Parser(OptionParser):
         def _process_args(self, largs, rargs, values):
             while rargs:
@@ -705,6 +780,8 @@ def parseCmdLine():
                       help="List current lssh sessions, default: %default")
     parser.add_option("", "--cmd", dest="cmd", default=None,
                       help="Run CMD in the remote session")
+    parser.add_option("", "--timeout", dest="timeout", default=300, type="int",
+                      help="Timeout for ssh, in seconds")
     parser.add_option("", "--lhost", dest="localhost",
                       default=localhost,
                       help="Override local hostname, default: %default")
@@ -733,24 +810,63 @@ def parseCmdLine():
     parser.add_option("", "--screenrc", dest="screenrc",
                       default="~/.screenrc",
                       help="Screen rc file to use, default: %default")
-    (opts, args) = parser.parse_args()
-    opts.statedb = os.path.expanduser(opts.statedb)
-    if opts.list:
-        return opts
-    if not opts.session:
-        opts.session = "lssh:%s:%s:%s" % (opts.localhost, pty, opts.user)
+    (options, args) = parser.parse_args()
+    options.statedb = os.path.expanduser(options.statedb)
+    if options.list:
+        return options
+    if not options.session:
+        options.session = "lssh:%s:%s:%s" % (options.localhost, pty,
+                                             options.user)
     if not len(args):
         parser.error("A host is required")
-    if not LSSH_SESS_RE.match(opts.session):
+    if not LSSH_SESS_RE.match(options.session):
         print "Custom session specified, disabling session management"
-        opts.nostatedb = True
-    opts.ssh_args = args
-    opts.script_cmd = SSH_CMD + [SSH_ARGS] + opts.ssh_args
-    opts.screenrc = os.path.expanduser(opts.screenrc)
-    opts.start_time = 30
-    opts.retry_time = 5
-    return opts
+        options.nostatedb = True
+    options.ssh_args = args
+    sshVersion()
+    parseSshArgs()
+    options.screenrc = os.path.expanduser(options.screenrc)
+    options.start_time = 30
+    options.retry_time = 5
+    options.ctl_path = os.path.expanduser("~/.ssh/master-%s@%s:%s" %
+                                          (options.user, options.ssh_host,
+                                           options.ssh_port))
+    if ssh_version >= min_ssh_ctl_ver:
+        SSH_ARGS[3] = options.ctl_path
+    options.script_cmd = SSH_CMD + SSH_ARGS + options.ssh_args
 
+def parseSshArgs():
+    args = list(options.ssh_args)
+    args.reverse()
+    for arg in args:
+        if not arg.startswith("-"):
+            options.ssh_host = arg
+            break
+    found = False
+    options.ssh_port = "22"
+    for arg in options.ssh_args:
+        if found:
+            options.ssh_port = arg
+            break
+        if arg == "-p":
+            found = True
+
+def sshVersion():
+    global ssh_version, SSH_ARGS, SSH_ARGS_STR
+    ret = commands.getstatusoutput("ssh -V")
+    debug("sshVersion: %s" % str(ret))
+    if ret[0] != 0:
+        print "Failed to find/run ssh."
+        sys.exit(-1)
+    arr = ret[1].split()
+    arr = arr[0].lstrip("OpenSSH_").split(".")
+    ssh_version = int(arr[0])
+    if ssh_version >= min_ssh_ctl_ver:
+        SSH_ARGS = ["-o", "ControlMaster auto", "-S", None, "-t"]
+        SSH_ARGS_STR = "-o 'ControlMaster auto' -S '%s' -t"
+    else:
+        SSH_ARGS = ["-t"]
+        SSH_ARGS_STR = "-t"
 
 # Non-exception throwing list managment functions. Sometimes python takes
 # exceptions too far.
@@ -768,7 +884,7 @@ def delList(val, list):
             return
 
 if __name__ == "__main__":
-    options = parseCmdLine()
+    parseCmdLine()
     debug("lssh %s" % version)
     debug("cmdline: " + " ".join(sys.argv))
     if options.list:

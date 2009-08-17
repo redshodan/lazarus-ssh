@@ -24,7 +24,9 @@ from optparse import OptionParser
 SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
 SSH_ARGS = None
-SSH_ARGS_STR = None
+SSH_PING_CMD = "-o 'ControlMaster no' -S '%s' -t %s /bin/true"
+SSH_CHECK_CMD = "-O check -S '%s' %s"
+SSH_BOGUS = "totally.tubularly.bogus"
 LSSH_LINE = "-=-=lssh-%d=-=-" % int(random.random() * 1000000)
 TRAP_HUP = "function lssh-exit\n{\nexport HISTFILE=\"\";\n}\n" \
            "trap lssh-exit EXIT"
@@ -39,13 +41,10 @@ LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
 SCREEN_LINE_RE = re.compile(
     r"\s*[0-9]+\.(lssh:[^:]+:[^:]+:[a-z1-9_-]+)(\s|\033\[[0-9]+C)*(\(.*\))")
 LSSH_SESS_RE = re.compile(r"lssh:[^:]+:[^:]+:[a-z1-9_-]+")
-SSH_PING_CMD = "totally.tubularly.bogus /bin/true"
 options = None
 db = None
 runner = None
-the_password = None
-ssh_version = None
-min_ssh_ctl_ver = 4
+ssh = None
 logfile = None
 version = "0.1"
 
@@ -70,10 +69,9 @@ class SSHPinger(threading.Thread):
             debug("SSHPinger.ping")
             self.pinging = True
             self.event.set()
-            ret = commands.getstatusoutput("%s %s %s" %
-                                           (SSH_BIN,
-                                            SSH_ARGS_STR % options.ctl_path,
-                                            SSH_PING_CMD))
+            ret = commands.getstatusoutput(
+                "%s %s" % (SSH_BIN, SSH_PING_CMD % (options.ctl_path,
+                                                    SSH_BOGUS)))
             debug("Ping returned: %s" % str(ret))
             self.pinging = False
             if ret[0] != 0:
@@ -537,7 +535,7 @@ class Runner(object):
         debug("sessionStarted")
         self.started = True
         self.connected = True
-        if ((ssh_version >= min_ssh_ctl_ver) and options.timeout and
+        if (ssh.hasCtl() and options.timeout and
             not self.pinger):
             self.pinger = SSHPinger()
             self.pinger.start()
@@ -548,9 +546,12 @@ class Runner(object):
 
     def sessionFailed(self):
         debug("sessionFailed")
+        if not self.connected:
+            return
+        self.connected = False
         self.restart = True
         try:
-            os.kill(self.pid, signal.SIGTERM)
+            os.kill(self.pid, signal.SIGKILL)
         except:
             pass
 
@@ -624,11 +625,10 @@ class Runner(object):
                 if (self.child in ret[0]) or (self.stdout in ret[1]):
                     self.outpipe.run()
         except Exception, e:
-            print "Main loop exception", e, type(e)
+            debug("Main loop exception: %s %s" % (type(e), str(e)))
+            print "Main loop exception: %s %s" % (type(e), str(e))
             import traceback
             traceback.print_exc()
-            pass
-
         termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
 
         os.close(self.child)
@@ -644,8 +644,10 @@ class Runner(object):
                     if len(self.outpipe.obuff):
                         print "".join(self.outpipe.obuff)
                     if options.noreconnect:
+                        debug("No reconnect, not restarting")
                         return False
                     if self.restart:
+                        debug("Forced restart")
                         self.restart = False
                         return True
                     if os.WIFEXITED(ret[1]):
@@ -686,15 +688,18 @@ class Runner(object):
                             return True
                     else:
                         # shouldnt happen
+                        debug("invalid return from wait")
                         return False
                 except OSError, e:
                     if e.errno == errno.ERESTART:
                         continue
                     elif e.errno == errno.ECHILD:
+                        debug("ECHILD!!!")
                         break
                     else:
                         raise
         except Exception, e:
+            debug("WAIT exception: %s" % str(e))
             print "WAIT exception"
             import traceback
             traceback.print_exc()
@@ -705,6 +710,7 @@ class Runner(object):
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
         termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, self.orig_tty)
+        ssh.checkFifo()
         os.execvp(SSH_BIN, options.script_cmd)
 
 runner = Runner()
@@ -823,50 +829,70 @@ def parseCmdLine():
         print "Custom session specified, disabling session management"
         options.nostatedb = True
     options.ssh_args = args
-    sshVersion()
-    parseSshArgs()
+    ssh.parseVersion()
+    ssh.parseArgs()
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30
     options.retry_time = 5
     options.ctl_path = os.path.expanduser("~/.ssh/master-%s@%s:%s" %
                                           (options.user, options.ssh_host,
                                            options.ssh_port))
-    if ssh_version >= min_ssh_ctl_ver:
+    if ssh.hasCtl():
         SSH_ARGS[3] = options.ctl_path
     options.script_cmd = SSH_CMD + SSH_ARGS + options.ssh_args
 
-def parseSshArgs():
-    args = list(options.ssh_args)
-    args.reverse()
-    for arg in args:
-        if not arg.startswith("-"):
-            options.ssh_host = arg
-            break
-    found = False
-    options.ssh_port = "22"
-    for arg in options.ssh_args:
-        if found:
-            options.ssh_port = arg
-            break
-        if arg == "-p":
-            found = True
+class SSH(object):
+    def __init__(self):
+        self.password = None
+        self.version = None
+        self.min_ctl_ver = 4
 
-def sshVersion():
-    global ssh_version, SSH_ARGS, SSH_ARGS_STR
-    ret = commands.getstatusoutput("ssh -V")
-    debug("sshVersion: %s" % str(ret))
-    if ret[0] != 0:
-        print "Failed to find/run ssh."
-        sys.exit(-1)
-    arr = ret[1].split()
-    arr = arr[0].lstrip("OpenSSH_").split(".")
-    ssh_version = int(arr[0])
-    if ssh_version >= min_ssh_ctl_ver:
-        SSH_ARGS = ["-o", "ControlMaster auto", "-S", None, "-t"]
-        SSH_ARGS_STR = "-o 'ControlMaster auto' -S '%s' -t"
-    else:
-        SSH_ARGS = ["-t"]
-        SSH_ARGS_STR = "-t"
+    def hasCtl(self):
+        return self.version >= self.min_ctl_ver
+
+    def parseArgs(self):
+        args = list(options.ssh_args)
+        args.reverse()
+        for arg in args:
+            if not arg.startswith("-"):
+                options.ssh_host = arg
+                break
+        found = False
+        options.ssh_port = "22"
+        for arg in options.ssh_args:
+            if found:
+                options.ssh_port = arg
+                break
+            if arg == "-p":
+                found = True
+
+    def parseVersion(self):
+        global SSH_ARGS
+        ret = commands.getstatusoutput("ssh -V")
+        debug("sshVersion: %s" % str(ret))
+        if ret[0] != 0:
+            print "Failed to find/run ssh."
+            sys.exit(-1)
+        arr = ret[1].split()
+        arr = arr[0].lstrip("OpenSSH_").split(".")
+        self.version = int(arr[0])
+        if self.version >= self.min_ctl_ver:
+            SSH_ARGS = ["-o", "ControlMaster auto", "-S", None, "-t"]
+        else:
+            SSH_ARGS = ["-t"]
+
+    def checkFifo(self):
+        ret = commands.getstatusoutput(
+            "%s %s" % (SSH_BIN, SSH_CHECK_CMD % (options.ctl_path, SSH_BOGUS)))
+        if ret[0] == 0:
+            return
+        debug("Stale ctl_path found, removing: %s" % options.ctl_path)
+        try:
+            os.unlink(options.ctl_path)
+        except:
+            pass
+
+ssh = SSH()
 
 # Non-exception throwing list managment functions. Sometimes python takes
 # exceptions too far.

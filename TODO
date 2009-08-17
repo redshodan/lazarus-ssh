@@ -1,9 +1,8 @@
-- long args for lssh, remove need for --
++ long args for lssh, remove need for --
 - correctly grok host in session id matching.
 + if session overidden and its not a lssh style session then disable session
   management
 + if session overidden and its lssh style, then manage that session.
-- dbus support to listen for network up/down events
 - have mode to choose a lost session. ncurses/urwid list choice.
 - copy over tmp screenrc file. put it in /tmp, record in db, md5sum check at
   session startup. dont push again if dont need to.
@@ -16,6 +15,7 @@ nice to have later:
   - lssh server manages ssh master connections. timeout on them.
   - lssh clients use the master connection.
   - have lssh server mediate db file management.
+  - dbus support to listen for network up/down events
 - sub-screen cmdkey passing. option to make it behave sanely.
 
 bugs:

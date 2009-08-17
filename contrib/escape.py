@@ -2,6 +2,14 @@
 ## bitlets
 ##
 
+### main()
+    #ESCAPE_CODE = escapeCharToKey(ESCAPE_CHAR)
+
+### parseCmdLine()
+#     parser.add_option("-c", "--cmdkey", dest="cmdkey",
+#                       default="^Aa", help="Screen cmdkey. See screen manpage.")
+
+
 # ESCAPE_CHAR = '\\'
 # PASS_CHAR = '\\'
 # ESCAPE_CODE = None

@@ -100,8 +100,8 @@ def debug(arg):
 def passCB1(line, cb, *args):
     debug("passCB1")
     cb(*args)
-    if the_password and runner.started:
-        runner.writeTo(the_password)
+    if ssh.password and runner.started:
+        runner.writeTo(ssh.password)
         return OutPipe.SKIP
     else:
         if not options.nosavepass:
@@ -109,9 +109,8 @@ def passCB1(line, cb, *args):
         return OutPipe.FLUSH
 
 def passCB2(line):
-    global the_password
     debug("passCB2")
-    the_password = line.rstrip("\n").rstrip("\r\n").rstrip("\r")
+    ssh.password = line.rstrip("\n").rstrip("\r\n").rstrip("\r")
 
 class StateDB(object):
     def __init__(self):

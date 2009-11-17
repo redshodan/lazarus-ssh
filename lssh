@@ -18,7 +18,7 @@
 
 
 import os, pwd, socket, sys, commands, re, random, types, threading
-import tty, termios, signal, select, fcntl, errno, time, thread
+import tty, termios, signal, select, fcntl, errno, time, thread, posix
 from optparse import OptionParser
 
 SSH_CMD = ["ssh"]
@@ -488,7 +488,7 @@ class Runner(object):
         self.outpipe = OutPipe(self.ins, self.outs)
         self.stdin = sys.stdin.fileno()
         self.stdout = sys.stdout.fileno()
-        self.orig_tty = termios.tcgetattr(self.stdin)
+        self.orig_tty = None
         self.started = False
         self.connected = False
         self.restart = False
@@ -590,17 +590,27 @@ class Runner(object):
                 time.sleep(1)
 
     def runConnection(self):
-        self.pid, self.child = os.forkpty()
+        self.orig_tty = termios.tcgetattr(self.stdin)
+
+        self.pid, self.child = posix.forkpty()
         if self.pid == 0:
-            self.runChild()
+            # FIXME: lsshdb fd
+            os.close(3)
+            termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
+            os.execvp(SSH_BIN, options.script_cmd)
             return False
 
         signal.signal(signal.SIGWINCH, self.sigWINCH)
-        termios.tcsetattr(self.child, termios.TCSANOW, self.orig_tty)
         self.sigWINCH(0, 0)
 
         new = termios.tcgetattr(self.stdin)
-        new[3] = new[3] & ~(termios.ICANON|termios.ECHO|termios.ISIG)
+        new[0] = new[0] | termios.IGNPAR
+        new[0] = new[0] & ~(termios.ISTRIP|termios.INLCR|termios.IGNCR|
+                            termios.ICRNL|termios.IXON|termios.IXANY|termios.IXOFF)
+        new[3] = new[3] & ~(termios.ICANON|termios.ISIG|termios.ECHO|
+                            termios.ECHOE|termios.ECHOK|
+                            termios.IEXTEN|termios.ECHONL)
+        new[1] = new[1] & ~termios.OPOST
         termios.tcsetattr(self.stdin, termios.TCSANOW, new)
 
         fcntl.fcntl(self.stdin, fcntl.F_SETFL, os.O_NONBLOCK)
@@ -705,12 +715,6 @@ class Runner(object):
             print e
         return False
 
-    def runChild(self):
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self.orig_tty)
-        termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
-        termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, self.orig_tty)
-        ssh.checkFifo()
-        os.execvp(SSH_BIN, options.script_cmd)
 
 runner = Runner()
 
@@ -876,9 +880,9 @@ class SSH(object):
         arr = arr[0].lstrip("OpenSSH_").split(".")
         self.version = int(arr[0])
         if self.version >= self.min_ctl_ver:
-            SSH_ARGS = ["-o", "ControlMaster auto", "-S", None, "-t"]
+            SSH_ARGS = ["-o", "ControlMaster auto", "-S", None]
         else:
-            SSH_ARGS = ["-t"]
+            SSH_ARGS = []
 
     def checkFifo(self):
         ret = commands.getstatusoutput(

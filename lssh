@@ -595,7 +595,7 @@ class Runner(object):
         self.pid, self.child = posix.forkpty()
         if self.pid == 0:
             # FIXME: lsshdb fd
-            os.close(3)
+            #os.close(3)
             termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
                               self.orig_tty)
             os.execvp(SSH_BIN, options.script_cmd)

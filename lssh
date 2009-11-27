@@ -596,7 +596,8 @@ class Runner(object):
         if self.pid == 0:
             # FIXME: lsshdb fd
             os.close(3)
-            termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW, self.orig_tty)
+            termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
+                              self.orig_tty)
             os.execvp(SSH_BIN, options.script_cmd)
             return False
 
@@ -606,7 +607,8 @@ class Runner(object):
         new = termios.tcgetattr(self.stdin)
         new[0] = new[0] | termios.IGNPAR
         new[0] = new[0] & ~(termios.ISTRIP|termios.INLCR|termios.IGNCR|
-                            termios.ICRNL|termios.IXON|termios.IXANY|termios.IXOFF)
+                            termios.ICRNL|termios.IXON|termios.IXANY|
+                            termios.IXOFF)
         new[3] = new[3] & ~(termios.ICANON|termios.ISIG|termios.ECHO|
                             termios.ECHOE|termios.ECHOK|
                             termios.IEXTEN|termios.ECHONL)

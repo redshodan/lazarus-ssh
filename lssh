@@ -1,6 +1,6 @@
 #!/usr/bin/python
 #
-# Copyright (C) 2009 James Newton
+# Copyright (C) 2009 James Newton <redshodan@gmail.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -596,6 +596,7 @@ class Runner(object):
         if self.pid == 0:
             # FIXME: lsshdb fd
             #os.close(3)
+            ssh.checkFifo()
             termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
                               self.orig_tty)
             os.execvp(SSH_BIN, options.script_cmd)
@@ -791,7 +792,7 @@ def parseCmdLine():
                       help="List current lssh sessions, default: %default")
     parser.add_option("", "--cmd", dest="cmd", default=None,
                       help="Run CMD in the remote session")
-    parser.add_option("", "--timeout", dest="timeout", default=300, type="int",
+    parser.add_option("", "--timeout", dest="timeout", default=120, type="int",
                       help="Timeout for ssh, in seconds")
     parser.add_option("", "--lhost", dest="localhost",
                       default=localhost,

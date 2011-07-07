@@ -73,9 +73,9 @@ class SSHPinger(threading.Thread):
                 "%s %s" % (SSH_BIN, SSH_PING_CMD % (options.ctl_path,
                                                     SSH_BOGUS)))
             debug("Ping returned: %s" % str(ret))
-            self.pinging = False
-            if ret[0] != 0:
+            if ret[0] != 0 and self.pinging:
                 runner.sessionFailed()
+            self.pinging = False
 
     def timeoutCheck(self):
         while True:
@@ -88,6 +88,7 @@ class SSHPinger(threading.Thread):
             debug("SSHPinger.timeout waited")
             if self.pinging:
                 runner.sessionFailed()
+            self.pinging = False
 
 def debug(arg):
     global logfile

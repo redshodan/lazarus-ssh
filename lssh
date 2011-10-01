@@ -823,6 +823,9 @@ def parseCmdLine():
     parser.add_option("", "--screenrc", dest="screenrc",
                       default="~/.screenrc",
                       help="Screen rc file to use, default: %default")
+    parser.add_option("", "--ctl-path", dest="ctl_path",
+                      default="~/.ssh/master-%u@%h:%p",
+                      help="SSH ControlPath to use, default: %default")
     (options, args) = parser.parse_args()
     options.statedb = os.path.expanduser(options.statedb)
     if options.list:
@@ -838,12 +841,10 @@ def parseCmdLine():
     options.ssh_args = args
     ssh.parseVersion()
     ssh.parseArgs()
+    ssh.buildCtlPath()
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30
     options.retry_time = 5
-    options.ctl_path = os.path.expanduser("~/.ssh/master-%s@%s:%s" %
-                                          (options.user, options.ssh_host,
-                                           options.ssh_port))
     if ssh.hasCtl():
         SSH_ARGS[3] = options.ctl_path
     options.script_cmd = SSH_CMD + SSH_ARGS + options.ssh_args
@@ -899,6 +900,35 @@ class SSH(object):
         except:
             pass
 
+    def buildCtlPath(self):
+        percent = False
+        subs = []
+        path = []
+        for c in options.ctl_path:
+            if c == "%":
+                percent = True
+            elif percent:
+                if c == "u":
+                    subs.append(options.user)
+                    c = "s"
+                elif c == "h":
+                    subs.append(options.ssh_host)
+                    c = "s"
+                elif c == "p":
+                    subs.append(options.ssh_port)
+                    c = "s"
+                percent = False
+            path.append(c)
+        path = "".join(path)
+        # I wish I could just do 'path % *subs' like a func call
+        if len(subs) == 3:
+            path = path % (subs[0], subs[1], subs[2])
+        elif len(subs) == 2:
+            path = path % (subs[0], subs[1])
+        elif len(subs) == 1:
+            path = path % (subs[0])
+        options.ctl_path = os.path.expanduser(path)
+        
 ssh = SSH()
 
 # Non-exception throwing list managment functions. Sometimes python takes

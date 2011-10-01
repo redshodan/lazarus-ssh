@@ -23,7 +23,8 @@ from optparse import OptionParser
 
 SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
-SSH_ARGS = None
+SSH_ARGS = []
+SSH_NOTTY_ARGS = ["echo Lazarus-SSH; cat > /dev/null"]
 SSH_PING_CMD = "-o 'ControlMaster no' -S '%s' -t %s /bin/true"
 SSH_CHECK_CMD = "-O check -S '%s' %s"
 SSH_BOGUS = "totally.tubularly.bogus"
@@ -36,6 +37,7 @@ SCREEN_CMD = "screen -D -R %s"
 USAGE = "usage: %prog [options] [ssh options] host"
 PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
 PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
+NOTTY_RE = re.compile(r"Lazarus-SSH")
 LINE_RE = re.compile(r"(\r\n|\r|\n)$")
 LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
 SCREEN_LINE_RE = re.compile(
@@ -120,7 +122,7 @@ class StateDB(object):
 
     def startup(self):
         self.mysess = [options.session, os.getpid(), False, False]
-        if options.nostatedb:
+        if options.nostatedb or options.notty:
             return False
         if not self.open():
             sys.exit(-1)
@@ -507,12 +509,13 @@ class Runner(object):
 
     def startSession(self, passing):
         debug("startSession")
-        self.cmd = ("exec %s" %
-#                    "bash")
-                  (SCREEN_CMD % options.session))
+        self.cmd = ("exec %s" % (SCREEN_CMD % options.session))
         self.outpipe.resetFilter()
         self.outpipe.passing = passing
-        self.outpipe.setRE(PROMPT_RE, self.startSessionCB1)
+        if options.notty:
+            self.outpipe.setRE(NOTTY_RE, self.sessionStartedCB)
+        else:
+            self.outpipe.setRE(PROMPT_RE, self.startSessionCB1)
         self.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.startSession, passing)
 
     def startSessionCB1(self, line, *args):
@@ -529,6 +532,14 @@ class Runner(object):
         if options.cmd and not self.started:
             self.writeTo(options.cmd)
         self.sessionStarted()
+        return OutPipe.SKIP
+
+    def sessionStartedCB(self, line, *args):
+        debug("sessionStartedCB")
+        self.outpipe.resetFilter()
+        self.sessionStarted()
+        self.resetTty()
+        print "Connected"
         return OutPipe.SKIP
 
     def sessionStarted(self):
@@ -590,6 +601,9 @@ class Runner(object):
             if ret:
                 time.sleep(1)
 
+    def resetTty(self):
+        termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
+
     def runConnection(self):
         self.orig_tty = termios.tcgetattr(self.stdin)
 
@@ -600,6 +614,7 @@ class Runner(object):
             ssh.checkFifo()
             termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
                               self.orig_tty)
+            debug("script_cmd: " + " ".join(options.script_cmd))
             os.execvp(SSH_BIN, options.script_cmd)
             return False
 
@@ -642,8 +657,9 @@ class Runner(object):
             print "Main loop exception: %s %s" % (type(e), str(e))
             import traceback
             traceback.print_exc()
-        termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
+        self.resetTty()
 
+        debug("Exited IO loop, killing ssh")
         os.close(self.child)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         os.kill(0, signal.SIGHUP)
@@ -729,7 +745,7 @@ def findHost():
     return host
 
 def parseCmdLine():
-    global options
+    global options, SSH_ARGS
     class Parser(OptionParser):
         def _process_args(self, largs, rargs, values):
             while rargs:
@@ -826,6 +842,9 @@ def parseCmdLine():
     parser.add_option("", "--ctl-path", dest="ctl_path",
                       default="~/.ssh/master-%u@%h:%p",
                       help="SSH ControlPath to use, default: %default")
+    parser.add_option("", "--notty", dest="notty",
+                      action="store_true", default=False,
+                      help="Headless mode, no tty, default: %default")
     (options, args) = parser.parse_args()
     options.statedb = os.path.expanduser(options.statedb)
     if options.list:
@@ -838,16 +857,22 @@ def parseCmdLine():
     if not LSSH_SESS_RE.match(options.session):
         print "Custom session specified, disabling session management"
         options.nostatedb = True
-    options.ssh_args = args
-    ssh.parseVersion()
-    ssh.parseArgs()
-    ssh.buildCtlPath()
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30
     options.retry_time = 5
+    # SSH options
+    options.user_ssh_args = args
+    ssh.parseVersion()
+    ssh.parseArgs()
+    ssh.buildCtlPath()
     if ssh.hasCtl():
-        SSH_ARGS[3] = options.ctl_path
-    options.script_cmd = SSH_CMD + SSH_ARGS + options.ssh_args
+        for index in range(len(SSH_ARGS)):
+            if SSH_ARGS[index] == "-S":
+                break
+        SSH_ARGS = SSH_ARGS[:index+1] + [options.ctl_path] + SSH_ARGS[index+1:]
+    options.script_cmd = SSH_CMD + SSH_ARGS + options.user_ssh_args
+    if options.notty:
+        options.script_cmd = options.script_cmd + SSH_NOTTY_ARGS
 
 class SSH(object):
     def __init__(self):
@@ -859,7 +884,10 @@ class SSH(object):
         return self.version >= self.min_ctl_ver
 
     def parseArgs(self):
-        args = list(options.ssh_args)
+        global SSH_ARGS
+        if options.notty:
+            SSH_ARGS = SSH_ARGS + ["-T"]
+        args = list(options.user_ssh_args)
         args.reverse()
         for arg in args:
             if not arg.startswith("-"):
@@ -867,7 +895,7 @@ class SSH(object):
                 break
         found = False
         options.ssh_port = "22"
-        for arg in options.ssh_args:
+        for arg in options.user_ssh_args:
             if found:
                 options.ssh_port = arg
                 break
@@ -885,7 +913,7 @@ class SSH(object):
         arr = arr[0].lstrip("OpenSSH_").split(".")
         self.version = int(arr[0])
         if self.version >= self.min_ctl_ver:
-            SSH_ARGS = ["-o", "ControlMaster auto", "-S", None]
+            SSH_ARGS = ["-o", "ControlMaster auto", "-S"]
         else:
             SSH_ARGS = []
 

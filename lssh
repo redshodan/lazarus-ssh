@@ -17,14 +17,15 @@
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 
-import os, pwd, socket, sys, commands, re, random, types, threading
+import os, pwd, socket, sys, commands, re, random, types, threading, string
 import tty, termios, signal, select, fcntl, errno, time, thread, posix
 from optparse import OptionParser
 
 SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
 SSH_ARGS = []
-SSH_NOTTY_ARGS = ["echo Lazarus-SSH; cat > /dev/null"]
+NOTTY_MARKER = "Lazarus-SSH"
+SSH_NOTTY_ARGS = ["echo %s; cat > /dev/null" % NOTTY_MARKER]
 SSH_PING_CMD = "-o 'ControlMaster no' -S '%s' -t %s /bin/true"
 SSH_CHECK_CMD = "-O check -S '%s' %s"
 SSH_BOGUS = "totally.tubularly.bogus"
@@ -33,11 +34,12 @@ TRAP_HUP = "function lssh-exit\n{\nexport HISTFILE=\"\";\n}\n" \
            "trap lssh-exit EXIT"
 LSSH_FUNC = ("function lssh-list\n{\necho \"%s\"; screen -ls; echo \"%s\";\n}" %
              (LSSH_LINE, LSSH_LINE))
-SCREEN_CMD = "screen -D -R %s"
+SCREEN_CMD = ["screen", "-D", "-R"]
+PY_MARKER = "# --==__END__==--"
 USAGE = "usage: %prog [options] [ssh options] host"
 PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
 PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
-NOTTY_RE = re.compile(r"Lazarus-SSH")
+NOTTY_RE = re.compile(NOTTY_MARKER)
 LINE_RE = re.compile(r"(\r\n|\r|\n)$")
 LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
 SCREEN_LINE_RE = re.compile(
@@ -49,6 +51,145 @@ runner = None
 ssh = None
 logfile = None
 version = "0.1"
+
+RPY_DELIM = "^^^"
+RPY_CMD = ["python", "-c",
+           "\"print '%s'; import sys; " % NOTTY_MARKER +
+           "exec '\\n'.join(sys.stdin.readline().split('%s'))\"" % RPY_DELIM]
+RPY_SRC = """
+import os, sys, signal, errno, atexit, time
+
+PROG = "@PROG@"
+ARGV = @ARGV@
+CTL_NAME = "/tmp/@SESSION@.ctl"
+noboot = @NOBOOT@
+pid = -1
+running = True
+suicide = False
+exit_val = 0
+
+def sigchld(signum, frame):
+    global running
+    running = False
+
+def sigterm(signum, frame):
+    global running
+    running = False
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except:
+        pass
+
+def setsigs():
+    signal.signal(signal.SIGCHLD, sigchld)
+    signal.signal(signal.SIGTERM, sigterm)
+    signal.signal(signal.SIGINT, sigterm)
+    signal.signal(signal.SIGHUP, sigterm)
+
+def clearsigs():
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+def waitchld():
+    global exit_val
+    while True:
+        try:
+            ret = os.waitpid(pid, 0)
+            if not suicide:
+                if os.WIFEXITED(ret[1]):
+                    exit_val = os.WEXITSTATUS(ret[1])
+                elif os.WIFSIGNALED(ret[1]):
+                    exit_val = os.WTERMSIG(ret[1])
+            break
+        except OSError, e:
+            if e.erro == errno.ERESTART:
+                continue
+            else:
+                raise
+
+def check():
+    attached = False
+    ctl = None
+    if os.path.exists(CTL_NAME):
+        try:
+            # This will throw ENXIO if the fifo is not opened for read
+            ctl = os.open(CTL_NAME, os.O_NONBLOCK | os.O_WRONLY)
+            attached = True
+        except OSError:
+            pass
+    if attached:
+        if noboot:
+            finish("lssh: Session already attached and --noboot is " +
+                   "set, exiting...")
+        else:
+            try:
+                print "lssh: Requesting other lssh session to detach..."
+                os.write(ctl, "x")
+                os.close(ctl)
+                time.sleep(1)
+            except:
+                pass
+
+def setup():
+    global pid
+    pid = os.fork()
+    if pid == 0:
+        os.execvp(PROG, ARGV)
+
+def cleanup():
+    if not suicide:
+        try:
+            os.unlink(CTL_NAME)
+        except:
+            pass
+
+def run():
+    global exit_val, suicide
+    if not os.path.exists(CTL_NAME):
+        os.mkfifo(CTL_NAME, 0660)
+    ctl = open(CTL_NAME, "r+")
+    atexit.register(cleanup)
+    
+    while running:
+        try:
+            ret = ctl.readline()
+            if ret.lower().startswith("x"):
+                suicide = True
+                os.kill(pid, signal.SIGHUP)
+                break
+        except IOError, e:
+            if e.errno == errno.EINTR:
+                pass
+            else:
+                raise
+    try:
+        ctl.close()
+    except:
+        pass
+
+    waitchld()
+
+def finish(msg):
+    clearsigs()
+    os.system("reset -Q")
+    if msg:
+        print msg
+    if suicide:
+        print "lssh: detach requested, exiting..."
+        sys.exit(0)
+    else:
+        print "lssh: exiting with %d" % exit_val
+        sys.exit(exit_val)
+
+check()
+setsigs()
+setup()
+run()
+finish(None)
+@PY_MARKER@
+"""
 
 class SSHPinger(threading.Thread):
     def __init__(self):
@@ -338,6 +479,7 @@ class Pipe(object):
         if self.buff:
             try:
                 size = os.write(self.ofd, self.buff)
+                debug("WRITE(%d): '%s'" % (self.ofd, self.buff[:size]))
             except OSError, e:
                 if e.errno == errno.EAGAIN:
                     insList(self.ofd, self.outs)
@@ -454,15 +596,13 @@ class OutPipe(Pipe):
                          re.match(line))):
                         cbret = cb(line, *args)
                         if cbret == self.SKIP:
-                            if options.debug:
-                                self.appendLine(ret, line)
                             docon = True
                         break
                 if docon:
                     continue
             if self.buffering:
                 self.appendLine(self.obuff, line)
-            if self.passing or options.debug:
+            if self.passing:
                 self.appendLine(ret, line)
         if cbret == self.FLUSH:
             return "".join(ret)
@@ -509,7 +649,10 @@ class Runner(object):
 
     def startSession(self, passing):
         debug("startSession")
-        self.cmd = ("exec %s" % (SCREEN_CMD % options.session))
+        if not options.nopy:
+            return self.startPYSession(passing)
+        self.cmd = ["exec"] + SCREEN_CMD + [options.session]
+        self.cmd = " ".join(self.cmd)
         self.outpipe.resetFilter()
         self.outpipe.passing = passing
         if options.notty:
@@ -542,6 +685,35 @@ class Runner(object):
         print "Connected"
         return OutPipe.SKIP
 
+    def startPYSession(self, passing):
+        self.outpipe.resetFilter()
+        self.outpipe.passing = passing
+        self.outpipe.setRE(NOTTY_RE, self.startPYSessionCB1)
+        self.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.startSession, passing)
+
+    def startPYSessionCB1(self, line, *args):
+        debug("startPYSessionCB1")
+        self.outpipe.resetFilter()
+        script = self.buildPYScript()
+        self.writeTo(script)
+        self.outpipe.passing = False
+        self.outpipe.setRE(PY_MARKER, self.startPYSessionCB2)
+        return OutPipe.SKIP
+        
+    def startPYSessionCB2(self, line, *args):
+        debug("startPYSessionCB2")
+        self.outpipe.resetFilter()
+        self.sessionStarted()
+        return OutPipe.SKIP
+
+    def buildPYScript(self):
+        src = string.replace(RPY_SRC, "@PROG@", SCREEN_CMD[0])
+        src = string.replace(src, "@ARGV@", str(SCREEN_CMD + [options.session]))
+        src = string.replace(src, "@SESSION@", options.session)
+        src = string.replace(src, "@NOBOOT@", str(options.noboot))
+        src = string.replace(src, "@PY_MARKER@", PY_MARKER)
+        return RPY_DELIM.join(src.split("\n"))
+        
     def sessionStarted(self):
         debug("sessionStarted")
         self.started = True
@@ -824,6 +996,12 @@ def parseCmdLine():
                       default="~/.lsshdb",
                       help=("Override state database location, " 
                             "default: %default"))
+    parser.add_option("", "--screenrc", dest="screenrc",
+                      default="~/.screenrc",
+                      help="Screen rc file to use, default: %default")
+    parser.add_option("", "--ctl-path", dest="ctl_path",
+                      default="~/.ssh/master-%u@%h:%p",
+                      help="SSH ControlPath to use, default: %default")
     parser.add_option("", "--nodb", dest="nostatedb",
                       action="store_true", default=False,
                       help="Disable state database, default: %default")
@@ -832,19 +1010,25 @@ def parseCmdLine():
                       help="Disable reconnect logic, default: %default")
     parser.add_option("", "--nopass", dest="nosavepass",
                       action="store_true", default=False,
-                      help="Dont save the password in memory, default: %default")
+                      help="Don't save the password in memory, default: "
+                           "%default")
+    parser.add_option("", "--nopy", dest="nopy",
+                      action="store_true", default=False,
+                      help="Don't run python on the remote side, default: "
+                           "%default")
     parser.add_option("", "--debug", dest="debug",
                       action="store_true", default=False,
                       help="Enable debug logging, default: %default")
-    parser.add_option("", "--screenrc", dest="screenrc",
-                      default="~/.screenrc",
-                      help="Screen rc file to use, default: %default")
-    parser.add_option("", "--ctl-path", dest="ctl_path",
-                      default="~/.ssh/master-%u@%h:%p",
-                      help="SSH ControlPath to use, default: %default")
     parser.add_option("", "--notty", dest="notty",
                       action="store_true", default=False,
                       help="Headless mode, no tty, default: %default")
+    parser.add_option("", "--noboot", dest="noboot",
+                      action="store_true", default=False,
+                      help="Do not boot older connections to the same session, "
+                           "fail this one, default: %default")
+    parser.add_option("", "--noshared", dest="noshared",
+                      action="store_true", default=False,
+                      help="Do not share ssh connections, default: %default")
     (options, args) = parser.parse_args()
     options.statedb = os.path.expanduser(options.statedb)
     if options.list:
@@ -857,6 +1041,8 @@ def parseCmdLine():
     if not LSSH_SESS_RE.match(options.session):
         print "Custom session specified, disabling session management"
         options.nostatedb = True
+    # FIXME: hax
+    options.nostatedb = True
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30
     options.retry_time = 5
@@ -873,6 +1059,8 @@ def parseCmdLine():
     options.script_cmd = SSH_CMD + SSH_ARGS + options.user_ssh_args
     if options.notty:
         options.script_cmd = options.script_cmd + SSH_NOTTY_ARGS
+    if not options.nopy:
+        options.script_cmd = options.script_cmd + ["-t"] + RPY_CMD
 
 class SSH(object):
     def __init__(self):
@@ -881,7 +1069,10 @@ class SSH(object):
         self.min_ctl_ver = 4
 
     def hasCtl(self):
-        return self.version >= self.min_ctl_ver
+        if options.noshared:
+            return False
+        else:
+            return self.version >= self.min_ctl_ver
 
     def parseArgs(self):
         global SSH_ARGS
@@ -913,7 +1104,10 @@ class SSH(object):
         arr = arr[0].lstrip("OpenSSH_").split(".")
         self.version = int(arr[0])
         if self.version >= self.min_ctl_ver:
-            SSH_ARGS = ["-o", "ControlMaster auto", "-S"]
+            if options.noshared:
+                SSH_ARGS = ["-o", "ControlMaster no"]
+            else:
+                SSH_ARGS = ["-o", "ControlMaster auto", "-S"]
         else:
             SSH_ARGS = []
 

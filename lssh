@@ -26,7 +26,7 @@ SSH_BIN = "ssh"
 SSH_ARGS = []
 NOTTY_MARKER = "Lazarus-SSH"
 SSH_NOTTY_ARGS = ["echo %s; cat > /dev/null" % NOTTY_MARKER]
-SSH_PING_CMD = "-o 'ControlMaster no' -S '%s' -t %s /bin/true"
+SSH_PING_CMD = "-o 'ControlMaster no' -x -S '%s' -t %s /bin/true"
 SSH_CHECK_CMD = "-O check -S '%s' %s"
 SSH_BOGUS = "totally.tubularly.bogus"
 LSSH_LINE = "-=-=lssh-%d=-=-" % int(random.random() * 1000000)

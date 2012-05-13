@@ -357,7 +357,6 @@ class StateDB(object):
 
     def listRemoteSessionsCB1(self, line, *args):
         debug("listRemoteSessionsCB1")
-        self.started = True
         runner.outpipe.passing = False
         runner.outpipe.setRE(LSSH_LINE_RE, self.listRemoteSessionsCB2)
         #runner.writeTo(TRAP_HUP)
@@ -672,8 +671,6 @@ class Runner(object):
     def startSessionCB2(self, line, *args):
         debug("startSessionCB2")
         self.outpipe.resetFilter()
-        if options.cmd and not self.started:
-            self.writeTo(options.cmd)
         self.sessionStarted()
         return OutPipe.SKIP
 
@@ -686,6 +683,7 @@ class Runner(object):
         return OutPipe.SKIP
 
     def startPYSession(self, passing):
+        debug("startPYSession")
         self.outpipe.resetFilter()
         self.outpipe.passing = passing
         self.outpipe.setRE(NOTTY_RE, self.startPYSessionCB1)
@@ -716,6 +714,8 @@ class Runner(object):
         
     def sessionStarted(self):
         debug("sessionStarted")
+        if options.cmd and not self.started:
+            self.writeTo(options.cmd)
         self.started = True
         self.connected = True
         if (ssh.hasCtl() and options.timeout and
@@ -981,7 +981,7 @@ def parseCmdLine():
                       help="List current lssh sessions, default: %default")
     parser.add_option("", "--cmd", dest="cmd", default=None,
                       help="Run CMD in the remote session")
-    parser.add_option("", "--timeout", dest="timeout", default=120, type="int",
+    parser.add_option("", "--timeout", dest="timeout", default=40, type="int",
                       help="Timeout for ssh, in seconds")
     parser.add_option("", "--lhost", dest="localhost",
                       default=localhost,

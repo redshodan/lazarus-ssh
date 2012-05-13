@@ -134,6 +134,9 @@ def check():
 
 def setup():
     global pid
+    vars = @ENV_VARS@
+    for key,val in vars.iteritems():
+        os.environ[key] = val
     pid = os.fork()
     if pid == 0:
         os.execvp(PROG, ARGV)
@@ -705,11 +708,17 @@ class Runner(object):
         return OutPipe.SKIP
 
     def buildPYScript(self):
+        env = {}
+        for var in options.vars.split(","):
+            if var in os.environ:
+                env[var] = os.environ[var]
+        debug("Sending ENV variables: %s" % env)
         src = string.replace(RPY_SRC, "@PROG@", SCREEN_CMD[0])
         src = string.replace(src, "@ARGV@", str(SCREEN_CMD + [options.session]))
         src = string.replace(src, "@SESSION@", options.session)
         src = string.replace(src, "@NOBOOT@", str(options.noboot))
         src = string.replace(src, "@PY_MARKER@", PY_MARKER)
+        src = string.replace(src, "@ENV_VARS@", str(env))
         return RPY_DELIM.join(src.split("\n"))
         
     def sessionStarted(self):
@@ -1002,6 +1011,9 @@ def parseCmdLine():
     parser.add_option("", "--ctl-path", dest="ctl_path",
                       default="~/.ssh/master-%u@%h:%p",
                       help="SSH ControlPath to use, default: %default")
+    parser.add_option("", "--vars", dest="vars", default="LANG,LC_ALL,TERM",
+                      help="ENV variables to push across, comma separated " +
+                      "names, default: %default")
     parser.add_option("", "--nodb", dest="nostatedb",
                       action="store_true", default=False,
                       help="Disable state database, default: %default")
@@ -1029,6 +1041,9 @@ def parseCmdLine():
     parser.add_option("", "--noshared", dest="noshared",
                       action="store_true", default=False,
                       help="Do not share ssh connections, default: %default")
+    parser.add_option("", "--novars", dest="novars",
+                      action="store_true", default=False,
+                      help="Do not push ENV variables across, default: %default")
     (options, args) = parser.parse_args()
     options.statedb = os.path.expanduser(options.statedb)
     if options.list:

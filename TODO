@@ -1,3 +1,6 @@
+- daemon mode
+- Look for this prompt from ssh:
+    Are you sure you want to continue connecting (yes/no)?
 + long args for lssh, remove need for --
 - correctly grok host in session id matching.
 + if session overidden and its not a lssh style session then disable session

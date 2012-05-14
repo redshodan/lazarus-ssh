@@ -25,7 +25,9 @@ SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
 SSH_ARGS = []
 NOTTY_MARKER = "Lazarus-SSH"
-SSH_NOTTY_ARGS = ["echo %s; cat > /dev/null" % NOTTY_MARKER]
+SSH_NOTTY_ARGS = \
+["python", "-c",
+ "\"print '%s'; import sys; sys.stdin.read();\"" % NOTTY_MARKER]
 SSH_PING_CMD = "-o 'ControlMaster no' -x -S '%s' -t %s /bin/true"
 SSH_CHECK_CMD = "-O check -S '%s' %s"
 SSH_BOGUS = "totally.tubularly.bogus"
@@ -1074,7 +1076,7 @@ def parseCmdLine():
     options.script_cmd = SSH_CMD + SSH_ARGS + options.user_ssh_args
     if options.notty:
         options.script_cmd = options.script_cmd + SSH_NOTTY_ARGS
-    if not options.nopy:
+    elif not options.nopy:
         options.script_cmd = options.script_cmd + ["-t"] + RPY_CMD
 
 class SSH(object):

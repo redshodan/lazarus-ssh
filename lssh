@@ -1003,10 +1003,10 @@ def parseCmdLine():
     parser.add_option("", "--sid", dest="session",
                       default=session,
                       help="Override screen session id, default: %default")
-    parser.add_option("", "--db", dest="statedb",
-                      default="~/.lsshdb",
-                      help=("Override state database location, " 
-                            "default: %default"))
+    # parser.add_option("", "--db", dest="statedb",
+    #                   default="~/.lsshdb",
+    #                   help=("Override state database location, " 
+    #                         "default: %default"))
     parser.add_option("", "--screenrc", dest="screenrc",
                       default="~/.screenrc",
                       help="Screen rc file to use, default: %default")
@@ -1016,9 +1016,9 @@ def parseCmdLine():
     parser.add_option("", "--vars", dest="vars", default="LANG,LC_ALL,TERM",
                       help="ENV variables to push across, comma separated " +
                       "names, default: %default")
-    parser.add_option("", "--nodb", dest="nostatedb",
-                      action="store_true", default=False,
-                      help="Disable state database, default: %default")
+    # parser.add_option("", "--nodb", dest="nostatedb",
+    #                   action="store_true", default=False,
+    #                   help="Disable state database, default: %default")
     parser.add_option("", "--norecon", dest="noreconnect",
                       action="store_true", default=False,
                       help="Disable reconnect logic, default: %default")
@@ -1030,9 +1030,6 @@ def parseCmdLine():
                       action="store_true", default=False,
                       help="Don't run python on the remote side, default: "
                            "%default")
-    parser.add_option("", "--debug", dest="debug",
-                      action="store_true", default=False,
-                      help="Enable debug logging, default: %default")
     parser.add_option("", "--notty", dest="notty",
                       action="store_true", default=False,
                       help="Headless mode, no tty, default: %default")
@@ -1046,8 +1043,11 @@ def parseCmdLine():
     parser.add_option("", "--novars", dest="novars",
                       action="store_true", default=False,
                       help="Do not push ENV variables across, default: %default")
+    parser.add_option("", "--debug", dest="debug",
+                      action="store_true", default=False,
+                      help="Enable debug logging, default: %default")
     (options, args) = parser.parse_args()
-    options.statedb = os.path.expanduser(options.statedb)
+    # options.statedb = os.path.expanduser(options.statedb)
     if options.list:
         return options
     if not options.session:
@@ -1055,10 +1055,10 @@ def parseCmdLine():
                                              options.user)
     if not len(args):
         parser.error("A host is required")
-    if not LSSH_SESS_RE.match(options.session):
-        print "Custom session specified, disabling session management"
-        options.nostatedb = True
-    # FIXME: hax
+    # if not LSSH_SESS_RE.match(options.session):
+    #     print "Custom session specified, disabling session management"
+    #     options.nostatedb = True
+    # FIXME: hax, disabled statedb till can make it work.
     options.nostatedb = True
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30

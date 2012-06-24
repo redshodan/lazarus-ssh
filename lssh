@@ -24,9 +24,11 @@ from optparse import OptionParser
 SSH_CMD = ["ssh"]
 SSH_BIN = "ssh"
 SSH_ARGS = []
-NOTTY_MARKER = "Lazarus-SSH"
-SSH_NOTTY_ARGS = ["echo %s; cat > /dev/null" % NOTTY_MARKER]
-SSH_PING_CMD = "-o 'ControlMaster no' -x -S '%s' -t %s /bin/true"
+LSSH_MARKER = "Lazarus-SSH"
+SSH_NOTTY_ARGS = \
+["python", "-c",
+ "\"print '%s'; import sys; sys.stdin.read();\"" % LSSH_MARKER]
+SSH_PING_CMD = "-o 'ControlMaster no' -x -S '%s' -t -t %s /bin/true"
 SSH_CHECK_CMD = "-O check -S '%s' %s"
 SSH_BOGUS = "totally.tubularly.bogus"
 LSSH_LINE = "-=-=lssh-%d=-=-" % int(random.random() * 1000000)
@@ -39,12 +41,13 @@ PY_MARKER = "# --==__END__==--"
 USAGE = "usage: %prog [options] [ssh options] host"
 PROMPT_RE = re.compile(r"[^#$%>\n]+[#$%>]+")
 PASS_PROMPT_RE = re.compile(r"^.*[Pp]assword:")
-NOTTY_RE = re.compile(NOTTY_MARKER)
+LSSH_MARKER_RE = re.compile(LSSH_MARKER)
 LINE_RE = re.compile(r"(\r\n|\r|\n)$")
 LSSH_LINE_RE = re.compile("^%s" % LSSH_LINE)
 SCREEN_LINE_RE = re.compile(
     r"\s*[0-9]+\.(lssh:[^:]+:[^:]+:[a-z1-9_-]+)(\s|\033\[[0-9]+C)*(\(.*\))")
 LSSH_SESS_RE = re.compile(r"lssh:[^:]+:[^:]+:[a-z1-9_-]+")
+daemonized = False
 options = None
 db = None
 runner = None
@@ -54,7 +57,7 @@ version = "0.1"
 
 RPY_DELIM = "^^^"
 RPY_CMD = ["python", "-c",
-           "\"print '%s'; import sys; " % NOTTY_MARKER +
+           "\"print '%s'; import sys; " % LSSH_MARKER +
            "exec '\\n'.join(sys.stdin.readline().split('%s'))\"" % RPY_DELIM]
 RPY_SRC = """
 import os, sys, signal, errno, atexit, time
@@ -241,7 +244,7 @@ def debug(arg):
     if options.debug:
         if not logfile:
             logfile = open("lssh.log", "w+")
-        logfile.write("%s : %s\n" % (time.time(), arg))
+        logfile.write("%s : %s\n" % (time.asctime(), arg))
         logfile.flush()
 
 def passCB1(line, cb, *args):
@@ -464,38 +467,52 @@ class Pipe(object):
         self.ifd = ifd
         self.ofd = ofd
 
+    def stopIn(self):
+        debug("stopin")
+        delList(self.ifd, self.ins)
+        self.ifd = None
+
+    def stopOut(self):
+        debug("stopout")
+        delList(self.ofd, self.outs)
+        self.ofd = None
+        
     def run(self):
-        if not self.buff:
-            try:
-                self.buff = os.read(self.ifd, 1024)
-            except OSError, e:
-                if e.errno == errno.EIO:
-                    delList(self.ifd, self.ins)
-                    self.buff = None
-                    return
-                elif e.errno != errno.EAGAIN:
-                    raise
-        if self.buff:
-            debug("READ(%d): '%s'" % (self.ifd, self.buff))
-            self.buff = self.filterData(self.buff)
-        if self.buff:
-            try:
-                size = os.write(self.ofd, self.buff)
-                debug("WRITE(%d): '%s'" % (self.ofd, self.buff[:size]))
-            except OSError, e:
-                if e.errno == errno.EAGAIN:
+        debug("Pipe.run(): ifd=%s ofd=%s" % (self.ifd, self.ofd))
+        if self.ifd is not None:
+            if not self.buff:
+                try:
+                    self.buff = os.read(self.ifd, 1024)
+                except OSError, e:
+                    if e.errno == errno.EIO:
+                        delList(self.ifd, self.ins)
+                        self.buff = None
+                        return
+                    elif e.errno != errno.EAGAIN:
+                        raise
+            if self.buff:
+                debug("READ(%d): '%s'" % (self.ifd, self.buff))
+                self.buff = self.filterData(self.buff)
+        if self.ofd is not None:
+            if self.buff:
+                try:
+                    size = os.write(self.ofd, self.buff)
+                    debug("WRITE(%d): '%s'" % (self.ofd, self.buff[:size]))
+                except OSError, e:
+                    if e.errno == errno.EAGAIN:
+                        insList(self.ofd, self.outs)
+                        delList(self.ifd, self.ins)
+                        return
+                if size != len(self.buff):
                     insList(self.ofd, self.outs)
                     delList(self.ifd, self.ins)
+                    self.buff = self.buff[size:]
                     return
-            if size != len(self.buff):
-                insList(self.ofd, self.outs)
-                delList(self.ifd, self.ins)
-                self.buff = self.buff[size:]
-                return
-        else:
-            insList(self.ifd, self.ins)
-            delList(self.ofd, self.outs)
-        self.buff = None
+            else:
+                if self.ifd:
+                    insList(self.ifd, self.ins)
+                delList(self.ofd, self.outs)
+            self.buff = None
 
     def isline(self, buff):
         l = len(buff)
@@ -635,6 +652,7 @@ class Runner(object):
         self.stdout = sys.stdout.fileno()
         self.orig_tty = None
         self.started = False
+        self.running = True
         self.connected = False
         self.restart = False
         self.run_count = 0
@@ -658,7 +676,7 @@ class Runner(object):
         self.outpipe.resetFilter()
         self.outpipe.passing = passing
         if options.notty:
-            self.outpipe.setRE(NOTTY_RE, self.sessionStartedCB)
+            self.outpipe.setRE(LSSH_MARKER_RE, self.sessionStartedCB)
         else:
             self.outpipe.setRE(PROMPT_RE, self.startSessionCB1)
         self.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.startSession, passing)
@@ -689,7 +707,7 @@ class Runner(object):
         debug("startPYSession")
         self.outpipe.resetFilter()
         self.outpipe.passing = passing
-        self.outpipe.setRE(NOTTY_RE, self.startPYSessionCB1)
+        self.outpipe.setRE(LSSH_MARKER_RE, self.startPYSessionCB1)
         self.outpipe.addRE(PASS_PROMPT_RE, passCB1, self.startSession, passing)
 
     def startPYSessionCB1(self, line, *args):
@@ -727,6 +745,9 @@ class Runner(object):
             self.writeTo(options.cmd)
         self.started = True
         self.connected = True
+        if options.daemon:
+            debug("Daemonizing...")
+            daemonize()
         if (ssh.hasCtl() and options.timeout and
             not self.pinger):
             self.pinger = SSHPinger()
@@ -735,6 +756,8 @@ class Runner(object):
     def sessionStopped(self):
         debug("sessionStopped")
         self.connected = False
+        self.pinger.pinging = False
+        self.pinger.event.clear()
 
     def sessionFailed(self):
         debug("sessionFailed")
@@ -742,10 +765,17 @@ class Runner(object):
             return
         self.connected = False
         self.restart = True
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-        except:
-            pass
+        self.killChild()
+
+    def killChild(self):
+        if self.pid >= 0:
+            debug("Killing pid %s" % self.pid)
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+                time.sleep(.5)
+                os.kill(self.pid, signal.SIGKILL)
+            except:
+                pass
 
     def writeTo(self, buff):
         if self.inpipe.buff:
@@ -769,55 +799,85 @@ class Runner(object):
             traceback.print_exc()
             print e
 
+    def stop(self):
+        self.restart = False
+        self.running = False
+        self.killChild()
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        os.kill(0, signal.SIGHUP)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
     def run(self):
         ret = True
-        while ret:
+        while self.running and ret:
             self.reset()
             self.start_timer = time.time()
             self.run_count = self.run_count + 1
             if self.run_count > 1:
                 self.startSession(True)
-            ret = self.runConnection()
+            try:
+                ret = self.runConnection()
+            except Exception, e:
+                debug("runConnection failed: %s" % str(e))
+                import traceback as tb
+                tb.print_tb(sys.exc_info()[2], None, logfile)
             self.sessionStopped()
             if ret:
                 time.sleep(1)
 
     def resetTty(self):
-        termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
+        if self.orig_tty:
+            try:
+                termios.tcsetattr(self.stdin, termios.TCSANOW, self.orig_tty)
+            except Exception, e:
+                debug("resetTty failed: %s" % str(e))
+        else:
+            debug("resetTty passing, no orig_tty")
+
+    def runChild(self):
+        # FIXME: close lsshdb fd
+        ssh.checkFifo()
+        termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
+                          self.orig_tty)
+        debug("script_cmd: " + " ".join(options.script_cmd))
+        os.execvp(SSH_BIN, options.script_cmd)
 
     def runConnection(self):
-        self.orig_tty = termios.tcgetattr(self.stdin)
+        if not self.orig_tty:
+            self.orig_tty = termios.tcgetattr(self.stdin)
 
         self.pid, self.child = posix.forkpty()
+        debug("Setting pid %s" % self.pid)
         if self.pid == 0:
-            # FIXME: lsshdb fd
-            #os.close(3)
-            ssh.checkFifo()
-            termios.tcsetattr(sys.stdout.fileno(), termios.TCSANOW,
-                              self.orig_tty)
-            debug("script_cmd: " + " ".join(options.script_cmd))
-            os.execvp(SSH_BIN, options.script_cmd)
+            self.runChild()
+            debug("Failed to exec. Exiting...")
             return False
 
         signal.signal(signal.SIGWINCH, self.sigWINCH)
         self.sigWINCH(0, 0)
-
-        new = termios.tcgetattr(self.stdin)
-        new[0] = new[0] | termios.IGNPAR
-        new[0] = new[0] & ~(termios.ISTRIP|termios.INLCR|termios.IGNCR|
-                            termios.ICRNL|termios.IXON|termios.IXANY|
-                            termios.IXOFF)
-        new[3] = new[3] & ~(termios.ICANON|termios.ISIG|termios.ECHO|
-                            termios.ECHOE|termios.ECHOK|
-                            termios.IEXTEN|termios.ECHONL)
-        new[1] = new[1] & ~termios.OPOST
-        termios.tcsetattr(self.stdin, termios.TCSANOW, new)
+            
+        if not daemonized:
+            new = termios.tcgetattr(self.stdin)
+            new[0] = new[0] | termios.IGNPAR
+            new[0] = new[0] & ~(termios.ISTRIP|termios.INLCR|termios.IGNCR|
+                                termios.ICRNL|termios.IXON|termios.IXANY|
+                                termios.IXOFF)
+            new[3] = new[3] & ~(termios.ICANON|termios.ISIG|termios.ECHO|
+                                termios.ECHOE|termios.ECHOK|
+                                termios.IEXTEN|termios.ECHONL)
+            new[1] = new[1] & ~termios.OPOST
+            termios.tcsetattr(self.stdin, termios.TCSANOW, new)
 
         fcntl.fcntl(self.stdin, fcntl.F_SETFL, os.O_NONBLOCK)
         fcntl.fcntl(self.child, fcntl.F_SETFL, os.O_NONBLOCK)
 
         try:
-            self.ins.extend([self.stdin, self.child])
+            del self.ins[:]
+            del self.outs[:]
+            if daemonized:
+                self.ins.extend([self.child])
+            else:
+                self.ins.extend([self.stdin, self.child])
             self.inpipe.setPipes(self.stdin, self.child)
             self.outpipe.setPipes(self.child, self.stdout)
             while len(self.ins) or len(self.outs):
@@ -829,6 +889,7 @@ class Runner(object):
                 except select.error, e:
                     if e[0] == 4:
                         continue
+                # debug("select: %s" % str(ret))
                 if (self.stdin in ret[0]) or (self.child in ret[1]):
                     self.inpipe.run()
                 if (self.child in ret[0]) or (self.stdout in ret[1]):
@@ -904,8 +965,8 @@ class Runner(object):
                     if e.errno == errno.ERESTART:
                         continue
                     elif e.errno == errno.ECHILD:
-                        debug("ECHILD!!!")
-                        break
+                        debug("ECHILD:")
+                        return True
                     else:
                         raise
         except Exception, e:
@@ -990,6 +1051,10 @@ def parseCmdLine():
                       help="List current lssh sessions, default: %default")
     parser.add_option("", "--cmd", dest="cmd", default=None,
                       help="Run CMD in the remote session")
+    parser.add_option("", "--daemon", dest="daemon",
+                      action="store_true", default=False,
+                      help="Enable daemon mode. Implies --notty, " +
+                      "default: %default")
     parser.add_option("", "--timeout", dest="timeout", default=40, type="int",
                       help="Timeout for ssh, in seconds")
     parser.add_option("", "--lhost", dest="localhost",
@@ -1001,10 +1066,10 @@ def parseCmdLine():
     parser.add_option("", "--sid", dest="session",
                       default=session,
                       help="Override screen session id, default: %default")
-    parser.add_option("", "--db", dest="statedb",
-                      default="~/.lsshdb",
-                      help=("Override state database location, " 
-                            "default: %default"))
+    # parser.add_option("", "--db", dest="statedb",
+    #                   default="~/.lsshdb",
+    #                   help=("Override state database location, " 
+    #                         "default: %default"))
     parser.add_option("", "--screenrc", dest="screenrc",
                       default="~/.screenrc",
                       help="Screen rc file to use, default: %default")
@@ -1014,9 +1079,9 @@ def parseCmdLine():
     parser.add_option("", "--vars", dest="vars", default="LANG,LC_ALL,TERM",
                       help="ENV variables to push across, comma separated " +
                       "names, default: %default")
-    parser.add_option("", "--nodb", dest="nostatedb",
-                      action="store_true", default=False,
-                      help="Disable state database, default: %default")
+    # parser.add_option("", "--nodb", dest="nostatedb",
+    #                   action="store_true", default=False,
+    #                   help="Disable state database, default: %default")
     parser.add_option("", "--norecon", dest="noreconnect",
                       action="store_true", default=False,
                       help="Disable reconnect logic, default: %default")
@@ -1028,9 +1093,6 @@ def parseCmdLine():
                       action="store_true", default=False,
                       help="Don't run python on the remote side, default: "
                            "%default")
-    parser.add_option("", "--debug", dest="debug",
-                      action="store_true", default=False,
-                      help="Enable debug logging, default: %default")
     parser.add_option("", "--notty", dest="notty",
                       action="store_true", default=False,
                       help="Headless mode, no tty, default: %default")
@@ -1044,8 +1106,11 @@ def parseCmdLine():
     parser.add_option("", "--novars", dest="novars",
                       action="store_true", default=False,
                       help="Do not push ENV variables across, default: %default")
+    parser.add_option("", "--debug", dest="debug",
+                      action="store_true", default=False,
+                      help="Enable debug logging, default: %default")
     (options, args) = parser.parse_args()
-    options.statedb = os.path.expanduser(options.statedb)
+    # options.statedb = os.path.expanduser(options.statedb)
     if options.list:
         return options
     if not options.session:
@@ -1053,16 +1118,20 @@ def parseCmdLine():
                                              options.user)
     if not len(args):
         parser.error("A host is required")
-    if not LSSH_SESS_RE.match(options.session):
-        print "Custom session specified, disabling session management"
-        options.nostatedb = True
-    # FIXME: hax
+    if options.daemon:
+        runner.outpipe.stopOut()
+        options.notty = True
+    # if not LSSH_SESS_RE.match(options.session):
+    #     print "Custom session specified, disabling session management"
+    #     options.nostatedb = True
+    # FIXME: hax, disabled statedb till can make it work.
     options.nostatedb = True
     options.screenrc = os.path.expanduser(options.screenrc)
     options.start_time = 30
     options.retry_time = 5
     # SSH options
     options.user_ssh_args = args
+    debug("User ssh args: %s" % args)
     ssh.parseVersion()
     ssh.parseArgs()
     ssh.buildCtlPath()
@@ -1072,9 +1141,11 @@ def parseCmdLine():
                 break
         SSH_ARGS = SSH_ARGS[:index+1] + [options.ctl_path] + SSH_ARGS[index+1:]
     options.script_cmd = SSH_CMD + SSH_ARGS + options.user_ssh_args
-    if options.notty:
+    if options.daemon:
+        options.script_cmd = options.script_cmd + ["-t"] + SSH_NOTTY_ARGS
+    elif options.notty:
         options.script_cmd = options.script_cmd + SSH_NOTTY_ARGS
-    if not options.nopy:
+    elif not options.nopy:
         options.script_cmd = options.script_cmd + ["-t"] + RPY_CMD
 
 class SSH(object):
@@ -1091,7 +1162,7 @@ class SSH(object):
 
     def parseArgs(self):
         global SSH_ARGS
-        if options.notty:
+        if options.notty and not options.daemon:
             SSH_ARGS = SSH_ARGS + ["-T"]
         args = list(options.user_ssh_args)
         args.reverse()
@@ -1183,10 +1254,41 @@ def delList(val, list):
             del list[index]
             return
 
+
+def daemonize():
+    global daemonized
+    if daemonized:
+        return
+    pid = os.fork()
+    if pid < 0:
+        runner.resetTty()
+        print "Failed to fork the process"
+        sys.exit(-1)
+    elif pid > 0:
+        runner.resetTty()
+        print "Daemonized.."
+        sys.exit(-1)
+    os.setsid()
+    os.close(sys.stdin.fileno())
+    sys.stdin = open("/dev/null", "r+")
+    os.close(sys.stdout.fileno())
+    sys.stdout = open("/dev/null", "r+")
+    os.close(sys.stderr.fileno())
+    sys.stderr = open("/dev/null", "r+")
+    runner.inpipe.stopIn()
+    daemonized = True
+
+def sighandler(signum, frame):
+    debug("sighandler got %d" % signum)
+    runner.stop()
+
 if __name__ == "__main__":
     parseCmdLine()
     debug("lssh %s" % version)
     debug("cmdline: " + " ".join(sys.argv))
+    signal.signal(signal.SIGTERM, sighandler)
+    signal.signal(signal.SIGINT, sighandler)
+    signal.signal(signal.SIGHUP, sighandler)
     if options.list:
         db.listLocalSessions()
         sys.exit(0)

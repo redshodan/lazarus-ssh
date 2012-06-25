@@ -986,8 +986,7 @@ def findHost():
         host = "localhost"
     return host
 
-def parseCmdLine():
-    global options, SSH_ARGS
+def buildParser():
     class Parser(OptionParser):
         def _process_args(self, largs, rargs, values):
             while rargs:
@@ -1046,23 +1045,25 @@ def parseCmdLine():
     session = "lssh:%s:%s:%s" % (localhost, pty, user)
 
     parser = Parser(usage=USAGE, version="lssh %s" % version)
-    parser.add_option("", "--ls", dest="list", action="store_true",
-                      default=False,
-                      help="List current lssh sessions, default: %default")
+    # parser.add_option("", "--ls", dest="list", action="store_true",
+    #                   default=False,
+    #                   help="List current lssh sessions, default: %default")
     parser.add_option("", "--cmd", dest="cmd", default=None,
                       help="Run CMD in the remote session")
     parser.add_option("", "--daemon", dest="daemon",
                       action="store_true", default=False,
-                      help="Enable daemon mode. Implies --notty, " +
+                      help="Enable headless daemon mode. Implies --notty, " +
                       "default: %default")
     parser.add_option("", "--timeout", dest="timeout", default=40, type="int",
                       help="Timeout for ssh, in seconds")
     parser.add_option("", "--lhost", dest="localhost",
                       default=localhost,
-                      help="Override local hostname, default: %default")
+                      help=("Override local hostname (for session id), " +
+                            "default: %default"))
     parser.add_option("", "--user", dest="user",
                       default=pwd.getpwuid(os.getuid())[0],
-                      help="Override local username, default: %default")
+                      help=("Override local username (for session id), " +
+                            "default: %default"))
     parser.add_option("", "--sid", dest="session",
                       default=session,
                       help="Override screen session id, default: %default")
@@ -1109,10 +1110,15 @@ def parseCmdLine():
     parser.add_option("", "--debug", dest="debug",
                       action="store_true", default=False,
                       help="Enable debug logging, default: %default")
+    return parser
+
+def parseCmdLine():
+    global options, SSH_ARGS
+    parser = buildParser()
     (options, args) = parser.parse_args()
     # options.statedb = os.path.expanduser(options.statedb)
-    if options.list:
-        return options
+    # if options.list:
+    #     return options
     if not options.session:
         options.session = "lssh:%s:%s:%s" % (options.localhost, pty,
                                              options.user)
@@ -1289,10 +1295,16 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, sighandler)
     signal.signal(signal.SIGINT, sighandler)
     signal.signal(signal.SIGHUP, sighandler)
-    if options.list:
-        db.listLocalSessions()
-        sys.exit(0)
-    if not db.startup():
-        runner.startSession(True)
+
+    ### Disabled until the db stuff is worked out
+    # if options.list:
+    #     db.listLocalSessions()
+    #     sys.exit(0)
+    # if not db.startup():
+    #     runner.startSession(True)
+    # runner.run()
+    # db.shutdown()
+
+    runner.startSession(True)
     runner.run()
-    db.shutdown()
+    

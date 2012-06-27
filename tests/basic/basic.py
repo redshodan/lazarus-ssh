@@ -21,11 +21,38 @@
 #
 
 
+import os, subprocess, signal
 from utils import LsshTestCase
 import log
 
 
 class BasicTests(LsshTestCase):
-    def test_test(self):
-        log.info("test_test")
-        pass
+    def _sigalarm(self, sig, frame):
+        log.info("ssh login test failed to complete in time")
+        self.ssh_timeout = True
+        self.ssh.kill()
+
+    # An ugly test which asserts that we can run ssh the way we expect it
+    # before testing lssh.
+    def testSshForTests(self):
+        log.info("Starting ssh login test")
+        signal.signal(signal.SIGALRM, self._sigalarm)
+        signal.alarm(2)
+        self.ssh_timeout = False
+        self.ssh = subprocess.Popen(
+            ["ssh", "-T", "localhost", "/bin/true"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        ret = self.ssh.communicate()
+        signal.alarm(0)
+        log.info("Finised ssh login test: ret=%d: %s", self.ssh.returncode,
+                 ret[0])
+        if self.ssh_timeout:
+            extra = "ssh login test failed to complete in time: "
+        else:
+            extra = ""
+        if self.ssh.returncode != 0:
+            self._resultForDoCleanups.stop()
+        self.assertIs(
+            self.ssh.returncode, 0,
+            "Can not ssh to localhost without a password, can not continue " +
+            "with tests: %sret=%d: %s" % (extra, self.ssh.returncode, ret[0]))

@@ -1,6 +1,6 @@
 #!/usr/bin/python
 #
-# Copyright (C) 2009 James Newton <redshodan@gmail.com>
+# Copyright (C) 2009 Chris Newton <redshodan@gmail.com>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -19,6 +19,7 @@
 
 import os, pwd, socket, sys, commands, re, random, types, threading, string
 import tty, termios, signal, select, fcntl, errno, time, thread, posix
+import optparse
 from optparse import OptionParser
 
 SSH_CMD = ["ssh"]
@@ -53,7 +54,17 @@ db = None
 runner = None
 ssh = None
 logfile = None
+
 version = "0.1"
+SHORT_DESC = \
+  ("Lazarus SSH maintains a SSH session and transparently reconnects as " +
+   "network conditions cause SSH to fail. To be able to reconnect lssh " +
+   "manages screen sessions on the remote machine for reattaching after " +
+   "restarting the SSH connection. This can be used to resume login sessions " +
+   "on remote machines after putting a laptop to sleep, changing networks, " +
+   "getting a new IP address, or simply to keep ssh usable on a connection " +
+   "with packet loss. ")
+LONG_DESC = SHORT_DESC
 
 RPY_DELIM = "^^^"
 RPY_CMD = ["python", "-c",
@@ -756,8 +767,9 @@ class Runner(object):
     def sessionStopped(self):
         debug("sessionStopped")
         self.connected = False
-        self.pinger.pinging = False
-        self.pinger.event.clear()
+        if self.pinger:
+            self.pinger.pinging = False
+            self.pinger.event.clear()
 
     def sessionFailed(self):
         debug("sessionFailed")
@@ -986,65 +998,59 @@ def findHost():
         host = "localhost"
     return host
 
-def buildParser():
-    class Parser(OptionParser):
-        def _process_args(self, largs, rargs, values):
-            while rargs:
-                arg = rargs[0]
-                if arg == "--":
-                    del rargs[0]
-                    return
-                elif arg[0:2] == "--":
-                    self._process_long_opt(rargs, values)
-                elif arg[:1] == "-" and len(arg) > 1:
-                    if not self._process_short_opts(rargs, values):
-                        largs.append(arg)
-                        del rargs[0]
-                elif self.allow_interspersed_args:
-                    largs.append(arg)
-                    del rargs[0]
-                else:
-                    return
-        def _process_short_opts(self, rargs, values):
-            arg = rargs.pop(0)
-            stop = False
-            i = 1
-            for ch in arg[1:]:
-                opt = "-" + ch
-                option = self._short_opt.get(opt)
-                i += 1
-                if not option:
-                    rargs.insert(0, arg)
-                    return False
-                if option.takes_value():
-                    if i < len(arg):
-                        rargs.insert(0, arg[i:])
-                        stop = True
-                    nargs = option.nargs
-                    if len(rargs) < nargs:
-                        if nargs == 1:
-                            self.error(_("%s option requires an argument") % opt)
-                        else:
-                            self.error(_("%s option requires %d arguments")
-                                       % (opt, nargs))
-                    elif nargs == 1:
-                        value = rargs.pop(0)
-                    else:
-                        value = tuple(rargs[0:nargs])
-                        del rargs[0:nargs]
-                else:
-                    value = None
-                option.process(opt, value, values, self)
-                if stop:
-                    break
-            return True
+class LongHelpFormatter(optparse.IndentedHelpFormatter):
+    def __init__(self, longfmt, *args, **kwargs):
+        optparse.IndentedHelpFormatter.__init__(self, *args, **kwargs)
+        self.longfmt = longfmt
+    
+    def format_option(self, option):
+        if self.longfmt and option.long_help:
+            option.help = option.long_help
+        return optparse.IndentedHelpFormatter.format_option(self, option)
 
-    pty = commands.getoutput("tty").lstrip("/dev/").replace("/", "-")
-    localhost = findHost()
-    user = pwd.getpwuid(os.getuid())[0]
+class Parser(OptionParser):
+    def _process_args(self, largs, rargs, values):
+        while rargs:
+            arg = rargs[0]
+            if arg == "--":
+                del rargs[0]
+                return
+            elif arg[0:2] == "--":
+                self._process_long_opt(rargs, values)
+            elif arg[:1] == "-" and len(arg) > 1:
+                # This allows unknown args to flow through
+                try:
+                    self._process_short_opts(rargs, values)
+                except optparse.BadOptionError:
+                    largs.append(arg)
+            elif self.allow_interspersed_args:
+                largs.append(arg)
+                del rargs[0]
+            else:
+                return
+def buildParser(localized=True, prog=None):
+    def helpLong(*args, **kwargs):
+        parser.description = LONG_DESC
+        parser.formatter.longfmt = True
+        parser.print_help()
+        parser.exit()
+
+    # Add a new allowed option attribute
+    optparse.Option.ATTRS.append("long_help")
+    if localized:
+        pty = commands.getoutput("tty").lstrip("/dev/").replace("/", "-")
+        localhost = findHost()
+        user = pwd.getpwuid(os.getuid())[0]
+    else:
+        pty = "TTY"
+        localhost = "HOSTNAME"
+        user = "USER"
     session = "lssh:%s:%s:%s" % (localhost, pty, user)
 
-    parser = Parser(usage=USAGE, version="lssh %s" % version)
+    parser = Parser(prog=prog, usage=USAGE, version="lssh %s" % version,
+                    description=SHORT_DESC, formatter=LongHelpFormatter(False))
+    parser.add_option("-H", "--help-long", action="callback", callback=helpLong,
+                      help="show a more verbose help message and exit")
     # parser.add_option("", "--ls", dest="list", action="store_true",
     #                   default=False,
     #                   help="List current lssh sessions, default: %default")
@@ -1056,16 +1062,13 @@ def buildParser():
                       "default: %default")
     parser.add_option("", "--timeout", dest="timeout", default=40, type="int",
                       help="Timeout for ssh, in seconds")
-    parser.add_option("", "--lhost", dest="localhost",
-                      default=localhost,
+    parser.add_option("", "--lhost", dest="localhost", default=localhost,
                       help=("Override local hostname (for session id), " +
                             "default: %default"))
-    parser.add_option("", "--user", dest="user",
-                      default=pwd.getpwuid(os.getuid())[0],
+    parser.add_option("", "--user", dest="user", default=user,
                       help=("Override local username (for session id), " +
                             "default: %default"))
-    parser.add_option("", "--sid", dest="session",
-                      default=session,
+    parser.add_option("", "--sid", dest="session", default=session,
                       help="Override screen session id, default: %default")
     # parser.add_option("", "--db", dest="statedb",
     #                   default="~/.lsshdb",
@@ -1078,8 +1081,8 @@ def buildParser():
                       default="~/.ssh/master-%u@%h:%p",
                       help="SSH ControlPath to use, default: %default")
     parser.add_option("", "--vars", dest="vars", default="LANG,LC_ALL,TERM",
-                      help="ENV variables to push across, comma separated " +
-                      "names, default: %default")
+                      help="Environment variables to push across, comma " +
+                      "separated names, default: %default")
     # parser.add_option("", "--nodb", dest="nostatedb",
     #                   action="store_true", default=False,
     #                   help="Disable state database, default: %default")
@@ -1114,7 +1117,7 @@ def buildParser():
 
 def parseCmdLine():
     global options, SSH_ARGS
-    parser = buildParser()
+    parser = buildParser(True)
     (options, args) = parser.parse_args()
     # options.statedb = os.path.expanduser(options.statedb)
     # if options.list:

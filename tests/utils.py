@@ -20,7 +20,7 @@
 # $Revision$
 #
 
-import os, sys, unittest2
+import os, sys, unittest2, subprocess, signal
 
 import log
 
@@ -28,19 +28,49 @@ import log
 ## unittest behavior adjustment
 ##
 class LsshTestCase(unittest2.TestCase):
-    def __init__(self, name):
+    def __init__(self, name, timeout=10):
         unittest2.TestCase.__init__(self, name)
+        self.test_name = str(self)
         self.orgtest = getattr(self, name)
         setattr(self, name, self._run)
+        if hasattr(self.orgtest, "timeout"):
+            self.timeout = self.orgtest.timeout
+        else:
+            self.timeout = timeout
+        self.error = ""
 
+    def _sigalarm(self, sig, frame):
+        log.info("_sigalarm: test failed to complete in time")
+        self.error = "Test failed to complete in time: "
+        self.cmd_timeout = True
+        self.cmd.kill()
+                
     def setUp(self):
         unittest2.TestCase.setUp(self)
-        log.info("=========Starting test: %s=========", str(self))
+        log.info("---------Starting test: %s(timeout=%d)---------",
+                 self.test_name, self.timeout)
+        self.cmd_timeout = False
+        self.error = ""
+        signal.signal(signal.SIGALRM, self._sigalarm)
+        signal.alarm(self.timeout)
 
     def tearDown(self):
+        signal.alarm(0)
         unittest2.TestCase.tearDown(self)
-        log.info("=========Ending test: %s=========", str(self))
+        log.info("---------Ending test: %s---------", self.test_name)
 
+    def runCmd(self, *args, **kwargs):
+        if "stdout" not in kwargs:
+            kwargs["stdout"] = subprocess.PIPE
+        if "stderr" not in kwargs:
+            kwargs["stderr"] = subprocess.STDOUT
+        log.info("Starting cmd: %s, %s" % (str(args), str(kwargs)))
+        self.cmd = subprocess.Popen(*args, **kwargs)
+        ret = self.cmd.communicate()
+        log.info("Finised cmd: ret=%d: %s", self.cmd.returncode,
+                 ret[0])
+        return [self.cmd.returncode] + list(ret)
+    
     def _run(self):
         try:
             self.orgtest()

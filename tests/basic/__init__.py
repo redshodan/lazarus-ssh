@@ -21,4 +21,27 @@
 #
 
 
-from .basic import *
+import os
+from utils import LsshTestCase
+import log
+
+
+class BasicTests(LsshTestCase):
+    # The initial test which tests basic ssh and fails all of the tests if
+    # ssh fails
+    def test1SshForTests(self):
+        ret = self.runCmd(["ssh", "-T", "localhost", "/bin/true"])
+        if ret[0] != 0:
+            self._resultForDoCleanups.stop()
+        self.assertIs(ret[0], 0,
+                      "Can not ssh to localhost without a password, can not " +
+                      "continue with tests: %sret=%d: %s" %
+                      (self.error, ret[0], ret[1]))
+    test1SshForTests.timeout = 2
+
+    def testBasic(self):
+        ret = self.runCmd(["ssh", "-T", "localhost", "/bin/true"])
+        self.assertIs(ret[0], 0,
+                      "Can not ssh to localhost without a password, can not " +
+                      "continue with tests: %sret=%d: %s" %
+                      (self.error, ret[0], ret[1]))

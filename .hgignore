@@ -1,1 +1,2 @@
-lssh.1
+build/*
+dist/*

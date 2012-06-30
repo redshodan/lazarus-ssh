@@ -21,27 +21,52 @@
 #
 
 
-import os
-from utils import LsshTestCase
+import os, pwd
+from subprocess import Popen
+from utils import (LsshTestCase, CriticalTest, ROOT, TEST, USER, TESTUSER,
+                   TESTPASS)
 import log
 
 
-class BasicTests(LsshTestCase):
-    # The initial test which tests basic ssh and fails all of the tests if
-    # ssh fails
-    def test1SshForTests(self):
-        ret = self.runCmd(["ssh", "-T", "localhost", "/bin/true"])
-        if ret[0] != 0:
-            self._resultForDoCleanups.stop()
-        self.assertIs(ret[0], 0,
-                      "Can not ssh to localhost without a password, can not " +
-                      "continue with tests: %sret=%d: %s" %
-                      (self.error, ret[0], ret[1]))
-    test1SshForTests.timeout = 2
 
-    def testBasic(self):
-        ret = self.runCmd(["ssh", "-T", "localhost", "/bin/true"])
-        self.assertIs(ret[0], 0,
-                      "Can not ssh to localhost without a password, can not " +
-                      "continue with tests: %sret=%d: %s" %
-                      (self.error, ret[0], ret[1]))
+# The initial test which tests basic ssh and fails all of the tests if
+# ssh fails
+class BasicTests(LsshTestCase):
+    def __init__(self, name, timeout=2):
+        LsshTestCase.__init__(self, name, timeout)
+    
+    @CriticalTest
+    def test00SudoForTests(self):
+        p = pwd.getpwnam(TESTUSER)
+        ret = self.runCmd(TEST, "echo $UID", fail="Can not run sudo.")
+        self.assertEquals(int(ret[1].strip()), p.pw_uid,
+                          "Can not sudo as test user")
+
+    @CriticalTest
+    def test01MakeSshKey(self):
+        ret = self.runCmd(TEST,
+                          "[[ -f ~/.ssh/id_rsa && -f ~/.ssh/authorized_keys &&" +
+                          " -f ~/.ssh/authorized_keys_ ]]", fail=False)
+        if ret[0] == 0:
+            log.info("SSH key files already exist, skipping creation")
+            return
+        self.runCmd(
+            TEST, "rm -f ~/.ssh/id_rsa ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys")
+        self.runCmd(
+            TEST, "ssh-keygen -f ~/.ssh/id_rsa -t rsa -N foobar -q",
+            fail="Can not generate test user sshkey")
+        self.runCmd(TEST, "echo foobar > /tmp/lssh-test")
+        self.runCmd(TEST,
+                          "openssl rsa -in ~/.ssh/id_rsa -passin " +
+                          "file:/tmp/lssh-test > ~/.ssh/id_rsa.foo")
+        self.runCmd(TEST, "mv ~/.ssh/id_rsa.foo ~/.ssh/id_rsa")
+        self.runCmd(TEST, "chmod 600 ~/.ssh/id_rsa")
+        self.runCmd(TEST, "cp -f ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys")
+        self.runCmd(TEST, "cp -f ~/.ssh/authorized_keys ~/.ssh/authorized_keys_")
+    
+    @CriticalTest
+    def test02SshNoPass(self):
+        ret = self.runCmd(
+            TEST, "ssh localhost /bin/true",
+            fail="Can not ssh to localhost without a password, can not " +
+            "continue with tests")

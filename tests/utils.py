@@ -24,10 +24,20 @@ import os, sys, unittest2, subprocess, signal
 
 import log
 
+THE_TEST = None
+TESTUSER = None
+TESTPASS = None
+ROOT = 1
+TEST = 2
+USER = 3
+
+SCREEN_NONE = "No Sockets found in /var/run/screen/S-test."
+
 ##
 ## unittest behavior adjustment
 ##
 class LsshTestCase(unittest2.TestCase):
+    
     def __init__(self, name, timeout=10):
         unittest2.TestCase.__init__(self, name)
         self.test_name = str(self)
@@ -46,9 +56,11 @@ class LsshTestCase(unittest2.TestCase):
         self.cmd.kill()
                 
     def setUp(self):
+        global THE_TEST
         unittest2.TestCase.setUp(self)
         log.info("---------Starting test: %s(timeout=%d)---------",
                  self.test_name, self.timeout)
+        THE_TEST = self
         self.cmd_timeout = False
         self.error = ""
         signal.signal(signal.SIGALRM, self._sigalarm)
@@ -59,18 +71,51 @@ class LsshTestCase(unittest2.TestCase):
         unittest2.TestCase.tearDown(self)
         log.info("---------Ending test: %s---------", self.test_name)
 
-    def runCmd(self, *args, **kwargs):
+    def runCmd(self, who, cmd, **kwargs):
+        if who == ROOT:
+            args = ["/usr/bin/sudo", "-i"]
+        elif who == TEST:
+            args = ["/usr/bin/sudo", "-u", TESTUSER, "-i"]
+        elif who == USER:
+            args = ["bash", "-c", cmd]
+        else:
+            raise Exception("Invalid 'who' for runCmd")
+        args.extend(["bash", "-c"])
+        args.append(cmd)
+        expect_fail = True
+        if "fail" in kwargs:
+            expect_fail = kwargs["fail"]
+            del kwargs["fail"]
         if "stdout" not in kwargs:
             kwargs["stdout"] = subprocess.PIPE
         if "stderr" not in kwargs:
             kwargs["stderr"] = subprocess.STDOUT
         log.info("Starting cmd: %s, %s" % (str(args), str(kwargs)))
-        self.cmd = subprocess.Popen(*args, **kwargs)
-        ret = self.cmd.communicate()
+        self.cmd = subprocess.Popen(args, **kwargs)
+        try:
+            ret = self.cmd.communicate()
+        except IOError, e:
+            if e.errno == 4:
+                ret = ["", ""]
+                self.cmd.returncode = -127
         log.info("Finised cmd: ret=%d: %s", self.cmd.returncode,
                  ret[0])
+        if expect_fail:
+            if expect_fail is True:
+                expect_fail = " ".join(args)
+            self.assertIs(
+                self.cmd.returncode, 0,
+                expect_fail + (" : %sret=%d: %s" % (self.error,
+                                                    self.cmd.returncode,
+                                                    ret[1])))
         return [self.cmd.returncode] + list(ret)
-    
+
+    def enableSshKey(self):
+        self.runCmd(TEST, "cp -f ~/.ssh/authorized_keys_ ~/.ssh/authorized_keys")
+
+    def disableSshKey(self):
+        self.runCmd(TEST, "rm -f ~/.ssh/authorized_keys")
+        
     def _run(self):
         try:
             self.orgtest()
@@ -81,22 +126,32 @@ class LsshTestCase(unittest2.TestCase):
             log.exception("Exception during test")
             raise
 
-class ModuleRef(object):
-    def __init__(self, obj=None):
-        self.__setobj__(obj)
-
-    def __setobj__(self, obj):
-        self.__dict__["__obj__"] = obj
-
-    def __getattr__(self, name):
-        if not self.__obj__:
-            raise AttributeError("name")
-        return getattr(self.__obj__, name)
-
-    def __setattr__(self, name, val):
-        self.__obj__.__setattr__(name, val)
-
+def CriticalTest(func):
+    def _failingTest(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except:
+            THE_TEST._resultForDoCleanups.stop()
+            raise
+    return _failingTest
 
 def init():
+    global TESTUSER, TESTPASS
+    
     log.init("test")
     log.logger.setLevel(log.DEBUG)
+    if "DISPLAY" in os.environ:
+        del os.environ["DISPLAY"]
+    
+    if "TESTUSER" in os.environ:
+        TESTUSER = os.environ["TESTUSER"]
+    else:
+        print ("The environment variable TESTUSER is not set. It must be set " +
+               "to a test user")
+        sys.exit(-1)
+    if "TESTPASS" in os.environ:
+        TESTPASS = os.environ["TESTPASS"]
+    else:
+        print ("The environment variable TESTPASS is not set. It must be set " +
+               "to the test user's password")
+        sys.exit(-1)

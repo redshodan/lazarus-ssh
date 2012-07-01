@@ -20,7 +20,7 @@
 # $Revision$
 #
 
-import os, sys, unittest2, subprocess, signal
+import os, sys, unittest2, subprocess, signal, termios
 
 import log
 
@@ -73,7 +73,7 @@ class LsshTestCase(unittest2.TestCase):
 
     def runCmd(self, who, cmd, **kwargs):
         if who == ROOT:
-            args = ["/usr/bin/sudo", "-i"]
+            args = ["/usr/bin/sudo"]
         elif who == TEST:
             args = ["/usr/bin/sudo", "-u", TESTUSER, "-i"]
         elif who == USER:
@@ -125,6 +125,13 @@ class LsshTestCase(unittest2.TestCase):
         except:
             log.exception("Exception during test")
             raise
+        finally:
+            try:
+                # Restore the tty in case ssh trashed it.
+                termios.tcsetattr(sys.stdin, termios.TCSANOW, ORIG_TTY)
+            except:
+                pass
+            
 
 def CriticalTest(func):
     def _failingTest(*args, **kwargs):
@@ -136,7 +143,7 @@ def CriticalTest(func):
     return _failingTest
 
 def init():
-    global TESTUSER, TESTPASS
+    global TESTUSER, TESTPASS, ORIG_TTY
     
     log.init("test")
     log.logger.setLevel(log.DEBUG)
@@ -149,9 +156,17 @@ def init():
         print ("The environment variable TESTUSER is not set. It must be set " +
                "to a test user")
         sys.exit(-1)
-    if "TESTPASS" in os.environ:
-        TESTPASS = os.environ["TESTPASS"]
-    else:
-        print ("The environment variable TESTPASS is not set. It must be set " +
-               "to the test user's password")
-        sys.exit(-1)
+
+    ORIG_TTY = termios.tcgetattr(sys.stdin)
+
+    # Make a test user password
+    r = os.urandom(12)
+    p = []
+    for c in r:
+        c = ord(c)
+        if c & 0x8:
+            p.append(chr(0x41 + c % 26))
+        else:
+            p.append(chr(0x61 + c % 26))
+    TESTPASS = "".join(p)
+    print "Will set the '%s' user's password to: %s" % (TESTUSER, TESTPASS)

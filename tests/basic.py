@@ -21,21 +21,20 @@
 #
 
 
-import os, pwd, unittest2
-from subprocess import Popen
+import os, pwd, unittest2, re
+from subprocess import Popen, PIPE, STDOUT
 from utils import (LsshTestCase, CriticalTest, ROOT, TEST, USER, TESTUSER,
-                   TESTPASS)
+                   TESTPASS, TESTPORT)
 import log
 
 
 class LsshTests(LsshTestCase):
     def testSshCmd(self):
-        self.runCmd(TEST, "./lssh localhost /bin/true")
+        self.runCmd(TEST, "ssh localhost /bin/true")
 
-    # FIXME:
-    @unittest2.skip("lssh --cmd doesn't exit after running cmd")
     def testLsshCmd(self):
-        self.runCmd(TEST, "./lssh --cmd=/bin/true localhost")
+        ret = self.runCmd(TEST, "./lssh --cmd='echo xxx$$; exit' localhost")
+        self.assertTrue(re.search("xxx[0-9]+", ret[1]))
 
     # FIXME:
     @unittest2.skip("Test needs to do the tty drain-wait password prompt " +
@@ -44,3 +43,40 @@ class LsshTests(LsshTestCase):
         self.disableSshKey()
         self.runCmd(TEST, "./lssh localhost /bin/true")
         self.enableSshKey()
+
+
+class NetworkTests(LsshTestCase):
+    THE_SSH = None
+    
+    @classmethod
+    def setUpClass(cls):
+        cls.THE_SSH = Popen(["sudo", "/usr/sbin/sshd", "-Dp", TESTPORT],
+                            stdout=PIPE, stderr=STDOUT)
+        log.info("Started custom sshd, pid=%d" % cls.THE_SSH.pid)
+
+    @classmethod
+    def tearDownClass(cls):
+        log.info("Killing custom sshd, pid=%d" % cls.THE_SSH.pid)
+        cls._runCmd(["sudo", "kill", str(cls.THE_SSH.pid)])
+        cls.unfilterSsh()
+
+    @classmethod
+    def filterSsh(cls):
+        log.info("Filtering custom ssh")
+        cls._runCmd(["sudo", "iptables", "-t", "filter", "-A", "INPUT", "-p",
+                     "tcp", "--dport", TESTPORT, "-j", "REJECT",
+                     "--reject-with", "icmp-host-unreachable"])
+
+    @classmethod
+    def unfilterSsh(cls):
+        log.info("Unfiltering custom ssh")
+        cls._runCmd(["sudo", "iptables", "-t", "filter", "-D", "INPUT", "-p",
+                     "tcp", "--dport", TESTPORT, "-j", "REJECT",
+                     "--reject-with", "icmp-host-unreachable"])
+
+    def testSshNoReconnFiltered(self):
+        self.filterSsh()
+        ret = self.runCmd(
+            TEST, "./lssh --norecon -p %s localhost" % TESTPORT,
+            fail=False)
+        self.assertTrue(ret[0] != 0, "ssh should have returned non-zero")

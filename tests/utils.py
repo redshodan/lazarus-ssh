@@ -27,6 +27,7 @@ import log
 THE_TEST = None
 TESTUSER = None
 TESTPASS = None
+TESTPORT = "2227"
 ROOT = 1
 TEST = 2
 USER = 3
@@ -73,9 +74,9 @@ class LsshTestCase(unittest2.TestCase):
 
     def runCmd(self, who, cmd, **kwargs):
         if who == ROOT:
-            args = ["/usr/bin/sudo"]
+            args = ["sudo"]
         elif who == TEST:
-            args = ["/usr/bin/sudo", "-u", TESTUSER, "-i"]
+            args = ["sudo", "-u", TESTUSER, "-i"]
         elif who == USER:
             args = ["bash", "-c", cmd]
         else:
@@ -86,20 +87,7 @@ class LsshTestCase(unittest2.TestCase):
         if "fail" in kwargs:
             expect_fail = kwargs["fail"]
             del kwargs["fail"]
-        if "stdout" not in kwargs:
-            kwargs["stdout"] = subprocess.PIPE
-        if "stderr" not in kwargs:
-            kwargs["stderr"] = subprocess.STDOUT
-        log.info("Starting cmd: %s, %s" % (str(args), str(kwargs)))
-        self.cmd = subprocess.Popen(args, **kwargs)
-        try:
-            ret = self.cmd.communicate()
-        except IOError, e:
-            if e.errno == 4:
-                ret = ["", ""]
-                self.cmd.returncode = -127
-        log.info("Finised cmd: ret=%d: %s", self.cmd.returncode,
-                 ret[0])
+        (ret, foo) = LsshTestCase._runCmd(args, kwargs, self)
         if expect_fail:
             if expect_fail is True:
                 expect_fail = " ".join(args)
@@ -110,6 +98,25 @@ class LsshTestCase(unittest2.TestCase):
                                                     ret[1])))
         return [self.cmd.returncode] + list(ret)
 
+    @staticmethod
+    def _runCmd(args, kwargs={}, obj=None):
+        if "stdout" not in kwargs:
+            kwargs["stdout"] = subprocess.PIPE
+        if "stderr" not in kwargs:
+            kwargs["stderr"] = subprocess.STDOUT
+        log.info("Starting cmd: %s, %s" % (str(args), str(kwargs)))
+        cmd = subprocess.Popen(args, **kwargs)
+        if obj:
+            obj.cmd = cmd
+        try:
+            ret = cmd.communicate()
+        except IOError, e:
+            if e.errno == 4:
+                ret = ["", ""]
+                self.cmd.returncode = -127
+        log.info("Finised cmd: ret=%d: %s", cmd.returncode, ret[0])
+        return (ret, cmd)
+    
     def enableSshKey(self):
         self.runCmd(TEST, "cp -f ~/.ssh/authorized_keys_ ~/.ssh/authorized_keys")
 

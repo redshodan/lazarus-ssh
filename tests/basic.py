@@ -21,7 +21,7 @@
 #
 
 
-import os, pwd
+import os, pwd, unittest2
 from subprocess import Popen
 from utils import (LsshTestCase, CriticalTest, ROOT, TEST, USER, TESTUSER,
                    TESTPASS)
@@ -32,13 +32,15 @@ class LsshTests(LsshTestCase):
     def testSshCmd(self):
         self.runCmd(TEST, "./lssh localhost /bin/true")
 
-    # FIXME: --cmd doesn't exit after running cmd.    
-    # def testLsshCmd(self):
-    #     self.runCmd(TEST, "./lssh --cmd=/bin/true localhost")
+    # FIXME:
+    @unittest2.skip("lssh --cmd doesn't exit after running cmd")
+    def testLsshCmd(self):
+        self.runCmd(TEST, "./lssh --cmd=/bin/true localhost")
 
-    # FIXME: Test needs to do the tty drain-wait password prompt to feed
-    # the password to ssh.
-    # def testCmdWithPass(self):
-    #     self.disableSshKey()
-    #     self.runCmd(TEST, "./lssh localhost /bin/true")
-    #     self.enableSshKey()
+    # FIXME:
+    @unittest2.skip("Test needs to do the tty drain-wait password prompt " +
+                    "to feed the password to ssh.")
+    def testCmdWithPass(self):
+        self.disableSshKey()
+        self.runCmd(TEST, "./lssh localhost /bin/true")
+        self.enableSshKey()

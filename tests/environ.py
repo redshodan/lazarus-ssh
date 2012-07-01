@@ -28,10 +28,9 @@ from utils import (LsshTestCase, CriticalTest, ROOT, TEST, USER, TESTUSER,
 import log
 
 
-
-# The initial test which tests basic ssh and fails all of the tests if
-# ssh fails
-class BasicTests(LsshTestCase):
+# Critical setup tests. Without these working, pretty much nothing will
+# work right.
+class EnvironTests(LsshTestCase):
     def __init__(self, name, timeout=2):
         LsshTestCase.__init__(self, name, timeout)
     
@@ -65,8 +64,18 @@ class BasicTests(LsshTestCase):
         self.runCmd(TEST, "cp -f ~/.ssh/authorized_keys ~/.ssh/authorized_keys_")
     
     @CriticalTest
-    def test02SshNoPass(self):
-        ret = self.runCmd(
+    def test02SetPass(self):
+        self.runCmd(
+            ROOT,
+            "echo -e '%s\n%s\n' | passwd -q %s" % (TESTPASS, TESTPASS, TESTUSER))
+
+    @CriticalTest
+    def test03CopyLssh(self):
+        self.runCmd(ROOT, "cp -f ../../lssh ~%s/lssh" % TESTUSER)
+
+    @CriticalTest
+    def test04SshNoPass(self):
+        self.runCmd(
             TEST, "ssh localhost /bin/true",
             fail="Can not ssh to localhost without a password, can not " +
             "continue with tests")

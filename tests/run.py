@@ -24,7 +24,7 @@
 ###
 ### Add test modules/packages here
 ###
-test_names = ["basic"]
+test_names = ["environ", "basic"]
 
 
 import os, sys
